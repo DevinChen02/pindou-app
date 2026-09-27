@@ -38,13 +38,15 @@ export const app = {
     }
     window.scrollTo(0, this._keepScroll ? scrollKeep : 0);
     this._keepScroll = false;
+    this.fresh = false;
     this.updateBadge();
   },
 
   /** 局部刷新时保持滚动位置 */
   rerender() { this._keepScroll = true; return this.render(); },
 
-  go(tab) { this.tab = tab; return this.render(); },
+  /** 切换标签。fresh = 刚切进来（页面可以回到首页状态） */
+  go(tab) { if (tab !== this.tab) this.fresh = true; this.tab = tab; return this.render(); },
 
   setTitle(t) { this.title.textContent = t; document.title = t === '拼豆计数器' ? t : `${t} · 拼豆计数器`; },
 
@@ -74,6 +76,7 @@ document.getElementById('tabbar').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]');
   if (!b) return;
   if (b.dataset.tab === 'settings') app.settingsPage = null; // 再点一次“设置”回到设置首页
+  app.fresh = true; // 再点一次“历史”也回到图纸列表
   app.go(b.dataset.tab);
 });
 
@@ -94,11 +97,12 @@ async function start() {
     }
   } catch (e) { console.warn(e); }
   await app.render();
+  store.gcImages(); // 清理没人用的图纸原图（不阻塞界面）
 }
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('./sw.js').then(reg => {
-    reg.addEventListener('updatefound', () => {
+    reg?.addEventListener('updatefound', () => {
       const nw = reg.installing;
       nw?.addEventListener('statechange', () => {
         if (nw.state === 'installed' && navigator.serviceWorker.controller) toast('有新版本，下次打开时生效');

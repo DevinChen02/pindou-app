@@ -140,7 +140,7 @@ function textPanel(app) {
     imgs,
     h('div.spacer'),
     h('button.btn.primary.block.big', {
-      onclick: () => {
+      onclick: async e => {
         const text = ta.value.trim();
         if (!text) { toast('请先粘贴文字'); return; }
         const res = extractText(text);
@@ -148,7 +148,8 @@ function textPanel(app) {
           toast('没从文字里找到“色号 + 数量”，请检查粘贴的内容', 'error');
           return;
         }
-        const images = (r.refWorks || []).map(referenceImage);
+        e.currentTarget.disabled = true;
+        const images = await Promise.all((r.refWorks || []).map(referenceImage));
         startSession(app, { method: 'text', images, items: res.items, statedTotal: res.statedTotal, statedColors: res.statedColors, rawText: text });
         app.render();
       },
@@ -307,6 +308,8 @@ async function runExtraction(app) {
   await app.render();
   const images = [], items = [];
   const errors = [];
+  // 取消时把这次已经存下的原图删掉
+  const dropImages = () => store.deleteImagesIfUnused(images.map(im => im.fullId).filter(Boolean));
   const setStatus = (i, msg) => {
     if (app.rec.step !== 'running') return;
     r.status = (r.works.length > 1 ? `第 ${i + 1}/${r.works.length} 张 · ` : '') + msg;
@@ -314,14 +317,14 @@ async function runExtraction(app) {
     if (p) p.textContent = r.status;
   };
   for (let i = 0; i < r.works.length; i++) {
-    if (signal.aborted) return;
+    if (signal.aborted) { dropImages(); return; }
     const work = r.works[i];
     try {
       const res = await extractImage(method, settings, work, images.length, { signal, onStatus: m => setStatus(i, m) });
       images.push(res.image);
       items.push(...res.items);
     } catch (e) {
-      if (e.name === 'AbortError' || signal.aborted) return;
+      if (e.name === 'AbortError' || signal.aborted) { dropImages(); return; }
       console.error(e);
       errors.push(`${work.name}：${e.message}`);
     }
@@ -329,7 +332,7 @@ async function runExtraction(app) {
     const bar = app.view.querySelector('.progress i');
     if (bar) bar.style.width = Math.round(r.progress * 100) + '%';
   }
-  if (app.rec.step !== 'running') return;
+  if (app.rec.step !== 'running') { dropImages(); return; }
   if (!images.length) {
     r.step = 'pick';
     await app.render();

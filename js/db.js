@@ -2,10 +2,11 @@
 //   colors        每个色号的库存：{ code, stock, threshold|null, updatedAt }
 //   patterns      图纸：{ id, name, createdAt, status, items:[{code,count}], statedTotal, thumb, txId }
 //   transactions  库存流水：{ id, time, type, patternId, note, deltas:[{code, delta, before, after}], undone }
+//   images        图纸原图（JPEG dataURL）：{ id, dataUrl, w, h, name, createdAt }
 //   kv            设置、未完成的核对进度等：{ key, value }
 
 const DB_NAME = 'pindou-counter';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // v2：新增 images（保存图纸原图，方便随时放大查看）
 let dbPromise = null;
 
 export function openDB() {
@@ -21,10 +22,16 @@ export function openDB() {
         s.createIndex('time', 'time');
       }
       if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv', { keyPath: 'key' });
+      if (!db.objectStoreNames.contains('images')) db.createObjectStore('images', { keyPath: 'id' });
     };
-    r.onsuccess = () => resolve(r.result);
+    r.onsuccess = () => {
+      const db = r.result;
+      // 新版本要升级数据库时，旧页面主动让出
+      db.onversionchange = () => db.close();
+      resolve(db);
+    };
     r.onerror = () => reject(r.error);
-    r.onblocked = () => reject(new Error('数据库被占用，请关闭其他打开本应用的页面后重试'));
+    r.onblocked = () => console.warn('数据库升级被其他打开的页面挡住，关闭它们后会自动继续');
   });
   return dbPromise;
 }
@@ -75,11 +82,32 @@ export async function transaction(stores, fn) {
   });
 }
 
-export async function clearAll() {
+export async function getAllKeys(store) {
+  const db = await openDB();
+  return wrap(db.transaction(store).objectStore(store).getAllKeys());
+}
+
+/** 逐条读（不会一次把所有大图都读进内存） */
+export async function forEach(store, fn) {
   const db = await openDB();
   await new Promise((resolve, reject) => {
-    const t = db.transaction(['colors', 'patterns', 'transactions', 'kv'], 'readwrite');
-    for (const s of ['colors', 'patterns', 'transactions', 'kv']) t.objectStore(s).clear();
+    const r = db.transaction(store).objectStore(store).openCursor();
+    r.onsuccess = () => {
+      const c = r.result;
+      if (!c) return resolve();
+      fn(c.value);
+      c.continue();
+    };
+    r.onerror = () => reject(r.error);
+  });
+}
+
+export async function clearAll() {
+  const db = await openDB();
+  const stores = ['colors', 'patterns', 'transactions', 'kv', 'images'];
+  await new Promise((resolve, reject) => {
+    const t = db.transaction(stores, 'readwrite');
+    for (const s of stores) t.objectStore(s).clear();
     t.oncomplete = resolve;
     t.onerror = () => reject(t.error);
   });

@@ -294,7 +294,7 @@ function dataCard(app) {
     if (!f) return;
     try {
       const data = JSON.parse(await f.text());
-      if (!(await confirmDialog('用这个备份覆盖当前所有数据？', { ok: '覆盖导入', danger: true, detail: `备份时间：${data.exportedAt || '未知'}；${(data.colors || []).length} 个色号，${(data.patterns || []).length} 张图纸。当前数据会被替换。` }))) return;
+      if (!(await confirmDialog('用这个备份覆盖当前所有数据？', { ok: '覆盖导入', danger: true, detail: `备份时间：${data.exportedAt || '未知'}；${(data.colors || []).length} 个色号，${(data.patterns || []).length} 张图纸${(data.images || []).length ? `，${data.images.length} 张原图` : ''}。当前数据会被替换。` }))) return;
       await store.importData(data);
       toast('已导入', 'ok');
       app.render();
@@ -302,12 +302,19 @@ function dataCard(app) {
     fileIn.value = '';
   });
   const withKeys = h('input', { type: 'checkbox' });
+  const withImages = h('input', { type: 'checkbox' });
+  const imgLabel = h('span', '同时导出图纸原图');
+  store.imageStats().then(st => {
+    imgLabel.textContent = st.count ? `同时导出图纸原图（${st.count} 张，约 ${(st.bytes / 1048576).toFixed(1)} MB）` : '同时导出图纸原图（目前没有）';
+    if (!st.count) withImages.disabled = true;
+  }).catch(() => {});
   return h('div.card',
     h('div.kv', h('div', h('div.k', '导出备份'), h('div.d', '生成 JSON 文件，可“存储到文件”→ iCloud 云盘'),
-      h('label.row.gap-s.tiny.muted', { style: { marginTop: '4px' } }, withKeys, '同时导出 API Key / 口令')),
+      h('label.row.gap-s.tiny.muted', { style: { marginTop: '4px' } }, withKeys, '同时导出 API Key / 口令'),
+      h('label.row.gap-s.tiny.muted', { style: { marginTop: '4px' } }, withImages, imgLabel)),
     h('button.btn.sm', {
       onclick: async () => {
-        const data = await store.exportData({ includeSecrets: withKeys.checked });
+        const data = await store.exportData({ includeSecrets: withKeys.checked, includeImages: withImages.checked });
         const d = new Date();
         const name = `拼豆库存备份-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.json`;
         await shareFile(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }), name);
@@ -329,7 +336,7 @@ function dataCard(app) {
 
 function aboutCard() {
   return h('div.card',
-    h('p', h('b', '拼豆计数器'), h('span.muted.small', '　v1.1 · 仅供个人使用')),
+    h('p', h('b', '拼豆计数器'), h('span.muted.small', '　v1.2 · 仅供个人使用')),
     h('p.small.muted', '所有库存数据只保存在这台手机的浏览器里。请从主屏幕图标打开（和 Safari 里打开的是两份独立的数据）。'),
     h('p.small.muted', `色卡：${PALETTE.size} 色（${SERIES.join(' ')}）。`));
 }

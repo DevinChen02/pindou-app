@@ -3,6 +3,7 @@ import { h, clear, toast, confirmDialog, chip, pickCode, stepper, fmtNum } from 
 import { hexOf } from '../palette.js';
 import { colorCheck, itemIssues, totalsCheck, newId } from '../extract/index.js';
 import * as store from '../store.js';
+import { openImageViewer, entriesFromImages, hasViewable } from '../viewer.js';
 
 function issueLevel(item, s) {
   const is = itemIssues(item, s);
@@ -20,9 +21,11 @@ export async function renderVerify(app) {
 
 async function discard(app) {
   if (!(await confirmDialog('放弃这次识别？', { ok: '放弃', danger: true, detail: '已核对的内容不会保存。' }))) return;
+  const ids = store.sessionImageIds(app.rec.session);
   app.rec.session = null;
   app.rec.step = 'pick';
   await store.clearSession();
+  store.deleteImagesIfUnused(ids);
   app.render();
 }
 
@@ -53,6 +56,8 @@ function renderCard(app) {
   const zoom = zoomPanel(s, item);
   const full = fullPanel(s, item, !!zoom);
   view.append(zoom || full || h('div'));
+  const links = refLinks(s, item);
+  if (links) view.append(links);
 
   // 识别结果卡片
   const cc = colorCheck(item);
@@ -128,7 +133,7 @@ function zoomPanel(s, item) {
   const img = item.img != null ? s.images[item.img] : null;
   if (!img || !item.box) return null;
   const cv = h('canvas');
-  const wrap = h('div.ref', h('div.ref-zoom', cv, h('span.lbl', '图中（放大）')));
+  const wrap = h('div.ref', h('div.ref-zoom', { onclick: () => viewItem(s, item, 'legend') }, cv, h('span.lbl', '图中（放大）')));
   const im = new Image();
   im.onload = () => {
     const u = unionBox(item.box, item.countBox);
@@ -162,7 +167,9 @@ function zoomPanel(s, item) {
 /** 整张清单（高亮当前项），点开可全屏放大；没有截图时显示粘贴的文字 */
 function fullPanel(s, item, below) {
   const img = item.img != null ? s.images[item.img] : (s.images.length === 1 ? s.images[0] : null);
-  if (!img) {
+  if (!img?.display) {
+    if (img?.fullId) return null; // 只有整张图（比如从“历史”里打开的图纸）：用下面的“看完整原图”
+
     return s.rawText ? h('div.ref', h('div', { style: { padding: '12px 14px' } },
       h('div.small.muted', '粘贴的文字（没有附截图）：'),
       h('pre.small', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0', maxHeight: '140px', overflow: 'auto' } }, s.rawText))) : null;
@@ -177,7 +184,7 @@ function fullPanel(s, item, below) {
       width: ((b.x1 - b.x0) / img.dw * 100) + '%', height: ((b.y1 - b.y0) / img.dh * 100) + '%',
     } }));
   }
-  full.addEventListener('click', () => openViewer(img, hasBox ? item.box : null));
+  full.addEventListener('click', () => viewItem(s, item, 'legend'));
   return h('div.ref' + (below ? '.below' : ''), below ? h('div.ref-caption', '整张清单（框出的是当前这一项）') : null, full);
 }
 
@@ -186,34 +193,21 @@ function unionBox(a, b) {
   return { x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) };
 }
 
-function openViewer(img, box) {
-  let zoom = 1;
-  const inner = h('div.vinner', h('img', { src: img.display }));
-  if (box) {
-    inner.append(h('div', { style: {
-      position: 'absolute', border: '3px solid #e8604c', borderRadius: '6px', pointerEvents: 'none',
-      left: (box.x0 / img.dw * 100) + '%', top: (box.y0 / img.dh * 100) + '%',
-      width: ((box.x1 - box.x0) / img.dw * 100) + '%', height: ((box.y1 - box.y0) / img.dh * 100) + '%',
-    } }));
-  }
-  const scroll = h('div.vscroll', inner);
-  const setZoom = z => {
-    zoom = z;
-    inner.style.width = (z * 100) + '%';
-    for (const b of bar.querySelectorAll('[data-z]')) b.classList.toggle('primary', +b.dataset.z === z);
-    if (box) requestAnimationFrame(() => {
-      const w = inner.clientWidth, hgt = inner.clientHeight;
-      scroll.scrollLeft = (box.x0 + box.x1) / 2 / img.dw * w - scroll.clientWidth / 2;
-      scroll.scrollTop = (box.y0 + box.y1) / 2 / img.dh * hgt - scroll.clientHeight / 2;
-    });
-  };
-  const bar = h('div.vbar',
-    [1, 2, 4].map(z => h('button.btn.sm', { 'data-z': z, onclick: () => setZoom(z) }, `${z}×`)),
-    h('div.grow'),
-    h('button.btn.sm', { onclick: () => v.remove() }, '关闭'));
-  const v = h('div.viewer', bar, scroll);
-  document.body.append(v);
-  setZoom(box ? 2 : 1);
+/** 全屏看图：默认打开当前条目所在的图，并框出它 */
+function viewItem(s, item, view) {
+  const k = item.img != null ? item.img : 0;
+  const entries = entriesFromImages(s.images, item.img != null ? { img: item.img, box: item.box, countBox: item.countBox } : null);
+  // 看清单：直接放大到当前这一项；看整张图：先显示全图（当前项有框，点 ⌖ 可跳过去）
+  openImageViewer(entries, { index: Math.max(0, entries.findIndex(e => e.from === k)), view, focus: view === 'legend' });
+}
+
+/** 卡片上方的两个入口：放大清单 / 看完整原图 */
+function refLinks(s, item) {
+  const img = item.img != null ? s.images[item.img] : (s.images.length === 1 ? s.images[0] : null);
+  if (!img || !(img.display || img.fullId)) return null;
+  return h('div.ref-links',
+    img.display ? h('button.link', { onclick: () => viewItem(s, item, 'legend') }, '🔍 放大看清单') : h('span'),
+    img.fullId ? h('button.link', { onclick: () => viewItem(s, item, 'full') }, '🖼 看完整原图 ›') : null);
 }
 
 // ---------- 列表 / 汇总 ----------
@@ -253,7 +247,7 @@ function renderList(app) {
 
   view.append(h('div.row.gap', { style: { marginTop: '10px' } },
     h('button.btn.soft.grow', { onclick: () => addItem(app) }, '＋ 添加颜色'),
-    s.images.length ? h('button.btn.ghost', { onclick: () => viewAll(s) }, '看原图') : null));
+    hasViewable(s.images) ? h('button.btn.ghost', { onclick: () => openImageViewer(entriesFromImages(s.images), { view: 'full', focus: false }) }, '🖼 看原图') : null));
   const rc = recropButton(app);
   if (rc) view.append(rc);
 
@@ -275,21 +269,17 @@ function recropButton(app) {
   return h('div.center', h('button.link', {
     onclick: async () => {
       if (!(await confirmDialog('重新框选清单再识别？', { ok: '重新框选', detail: '当前的核对结果会被替换。' }))) return;
+      const ids = store.sessionImageIds(s);
       r.method = s.method;
       r.manualCrop = true;
       r.cropIndex = 0;
       r.session = null;
       r.step = 'crop';
       await store.clearSession();
+      store.deleteImagesIfUnused(ids);
       app.render();
     },
   }, '结果不对？重新框选清单再识别 ›'));
-}
-
-function viewAll(s) {
-  const imgs = s.images.map(im => h('img', { src: im.display, style: { width: '100%', display: 'block', marginBottom: '8px', borderRadius: '8px' } }));
-  const v = h('div.viewer', h('div.vbar', h('b', '原图'), h('div.grow'), h('button.btn.sm', { onclick: () => v.remove() }, '关闭')), h('div.vscroll', h('div', { style: { padding: '8px' } }, imgs)));
-  document.body.append(v);
 }
 
 async function addItem(app) {

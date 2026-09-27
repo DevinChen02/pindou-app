@@ -1,6 +1,7 @@
 // 库存预览（拼这幅图后每种颜色还剩多少）→ 确认拼豆 → 完成（补货提醒 / 撤销）
 import { h, clear, toast, confirmDialog, chip, fmtNum, copyText } from '../ui.js';
 import * as store from '../store.js';
+import { openImageViewer, entriesFromImages, hasViewable } from '../viewer.js';
 
 function sessionItems(s) {
   return s.items.filter(i => i.code && i.count > 0).map(i => ({ code: i.code, count: i.count }));
@@ -27,7 +28,10 @@ export async function renderPreview(app) {
 
   const nameInput = h('input.input', { value: s.name || '', placeholder: '给这幅图起个名字' });
   nameInput.addEventListener('input', () => { s.name = nameInput.value; app.saveSession(); });
-  view.append(h('div.field', h('label', '图纸名称'), nameInput));
+  view.append(h('div.field', h('label', '图纸名称'),
+    hasViewable(s.images)
+      ? h('div.row.gap', h('div.grow', { style: { minWidth: 0 } }, nameInput), h('button.btn.soft', { onclick: () => openImageViewer(entriesFromImages(s.images), { view: 'full', focus: false }) }, '🖼 看图纸'))
+      : nameInput));
 
   if (short.length) {
     const lack = short.reduce((a, r) => a + -r.after, 0);
@@ -107,9 +111,12 @@ async function ensurePattern(s, status) {
     }
   }
   const t = { images: s.images.map(im => im.thumb).filter(Boolean).slice(0, 4) };
+  // 整张图纸原图跟着图纸保存，以后在“历史”里也能放大看
+  const images = s.images.filter(im => im.fullId).map(im => ({ fullId: im.fullId, fw: im.fw, fh: im.fh, name: im.name || '' }));
   const id = await store.savePattern({
     name: s.name || '未命名图纸', status, items, method: s.method,
     statedTotal: s.statedTotal || null, thumbs: t.images,
+    images, imageIds: images.map(im => im.fullId),
   });
   s.patternId = id;
   return id;

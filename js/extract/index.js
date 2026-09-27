@@ -4,6 +4,7 @@ import { ocrExtract } from './ocr.js';
 import { parseLegendText } from './text.js';
 import { normalizeCode, deltaE, rgbOf, nearestCodes, isCode } from '../palette.js';
 import { cropCanvas, toDataURL, sampleSwatch, estimateTextHeightInBoxes, thumbnail, guessLegendRect } from '../image.js';
+import { putImage } from '../store.js';
 
 let seq = 0;
 export const newId = () => `i${Date.now().toString(36)}${(seq++).toString(36)}`;
@@ -18,6 +19,22 @@ function makeDisplay(canvas, rect, pad = 12) {
   const k = Math.min(2, 1400 / r.w, 2400 / r.h);
   const view = cropCanvas(canvas, r, k);
   return { dataUrl: toDataURL(view, 0.9), rect: r, k, w: view.width, h: view.height };
+}
+
+/**
+ * 把整张图纸（去掉黑边）存进数据库，核对时和以后都能放大看。
+ * 返回 { fullId, fw, fh, fullMap }，fullMap 把“清单参考图”上的坐标换算到整张图上：
+ *   full = display × k + (ox, oy)
+ */
+async function saveFullImage(work, disp) {
+  const c = work.content;
+  const k = Math.min(1, 2400 / Math.max(c.w, c.h), Math.sqrt(4.5e6 / (c.w * c.h)));
+  const view = cropCanvas(work.canvas, c, k);
+  const fullId = await putImage({ dataUrl: toDataURL(view, 0.86), w: view.width, h: view.height, name: work.name });
+  return {
+    fullId, fw: view.width, fh: view.height,
+    fullMap: disp ? { k: k / disp.k, ox: (disp.rect.x - c.x) * k, oy: (disp.rect.y - c.y) * k } : null,
+  };
 }
 
 function toDisplayBox(b, disp) {
@@ -66,11 +83,14 @@ export async function extractImage(method, settings, work, imgIndex, { onStatus,
       orig: { code: code || null, count: it.count ?? null },
     };
   });
+  let full = {};
+  try { full = await saveFullImage(work, disp); } catch (e) { console.warn('保存原图失败', e); }
   return {
     image: {
       name: work.name, display: disp.dataUrl, dw: disp.w, dh: disp.h,
       thumb: thumbnail(cropCanvas(work.canvas, work.content), 320),
       lowRes, statedTotal: res.statedTotal || null, statedColors: res.statedColors || null,
+      ...full,
     },
     items,
   };
@@ -91,15 +111,17 @@ export function extractText(text) {
 }
 
 /** 只作参考的截图（文字方法时可选附带） */
-export function referenceImage(work) {
-  // 只显示猜出来的清单区域，字更大、更好对照
+export async function referenceImage(work) {
+  // 只显示猜出来的清单区域，字更大、更好对照；整张图另存，可放大看
   let rect = work.content;
   try { rect = guessLegendRect(work.canvas, work.content); } catch { /* 用整张图 */ }
   const disp = makeDisplay(work.canvas, rect, 0);
+  let full = {};
+  try { full = await saveFullImage(work, disp); } catch (e) { console.warn('保存原图失败', e); }
   return {
     name: work.name, display: disp.dataUrl, dw: disp.w, dh: disp.h,
     thumb: thumbnail(cropCanvas(work.canvas, work.content), 320), lowRes: false,
-    statedTotal: null, statedColors: null,
+    statedTotal: null, statedColors: null, ...full,
   };
 }
 

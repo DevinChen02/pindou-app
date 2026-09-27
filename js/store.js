@@ -225,7 +225,67 @@ export async function listPatterns() {
   const all = await db.getAll('patterns');
   return all.sort((a, b) => b.createdAt - a.createdAt);
 }
-export async function deletePattern(id) { return db.del('patterns', id); }
+export async function deletePattern(id) {
+  const p = await db.get('patterns', id);
+  await db.del('patterns', id);
+  await deleteImagesIfUnused(p?.imageIds || []);
+}
+
+// ---------- 图纸原图 ----------
+
+let imgSeq = 0;
+// 本次打开 App 后新存的原图：识别还没结束、还没写进核对进度时，别被清理掉
+const freshImages = new Set();
+
+/** 保存一张原图，返回 id */
+export async function putImage({ dataUrl, w, h, name = '' }) {
+  const id = `img${Date.now().toString(36)}${(imgSeq++).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  await db.put('images', { id, dataUrl, w, h, name, createdAt: Date.now() });
+  freshImages.add(id);
+  return id;
+}
+export async function getImage(id) { return id ? db.get('images', id) : null; }
+
+/** 核对会话里用到的原图 id */
+export function sessionImageIds(s) {
+  return (s?.images || []).map(im => im.fullId).filter(Boolean);
+}
+
+async function usedImageIds() {
+  const used = new Set();
+  for (const p of await db.getAll('patterns')) for (const id of p.imageIds || []) used.add(id);
+  for (const id of sessionImageIds(await loadSession())) used.add(id);
+  return used;
+}
+
+/** 删掉这些原图（仍被某张图纸或未完成的核对用着的除外） */
+export async function deleteImagesIfUnused(ids) {
+  if (!ids?.length) return;
+  try {
+    const used = await usedImageIds();
+    for (const id of ids) {
+      freshImages.delete(id);
+      if (!used.has(id)) await db.del('images', id);
+    }
+  } catch (e) { console.warn('删除原图失败', e); }
+}
+
+/** 原图占用：{ count, bytes } */
+export async function imageStats() {
+  let count = 0, bytes = 0;
+  await db.forEach('images', im => { count++; bytes += Math.round((im.dataUrl?.length || 0) * 0.75); });
+  return { count, bytes };
+}
+
+/** 启动时清理没人用的原图：既不属于任何图纸，也不属于未完成的核对 */
+export async function gcImages() {
+  try {
+    const used = await usedImageIds();
+    for (const id of await db.getAllKeys('images')) {
+      if (!used.has(id) && !freshImages.has(id)) await db.del('images', id);
+    }
+  } catch (e) { console.warn('清理原图失败', e); }
+}
 
 // ---------- 未完成的核对（防止切到相册看原图时 App 被系统回收） ----------
 
@@ -344,7 +404,7 @@ export async function stockRecord(code) { return db.get('colors', code); }
 
 // ---------- 备份 ----------
 
-export async function exportData({ includeSecrets = false } = {}) {
+export async function exportData({ includeSecrets = false, includeImages = false } = {}) {
   const settings = structuredClone(await getSettings());
   if (!includeSecrets) {
     settings.methods.vlm.apiKeys = { anthropic: '', openai: '', gemini: '' };
@@ -356,6 +416,7 @@ export async function exportData({ includeSecrets = false } = {}) {
     palette: paletteDiff().custom ? paletteEntries() : null,
     patterns: await db.getAll('patterns'),
     transactions: await db.getAll('transactions'),
+    images: includeImages ? await db.getAll('images') : [],
     settings,
   };
 }
@@ -371,6 +432,7 @@ export async function importData(data) {
   for (const c of data.colors || []) await db.put('colors', c);
   for (const p of data.patterns || []) await db.put('patterns', p);
   for (const t of data.transactions || []) await db.put('transactions', t);
+  for (const im of data.images || []) await db.put('images', im);
   const s = merge(structuredClone(DEFAULT_SETTINGS), data.settings || {});
   // 备份里没带密钥时，保留当前手机上的密钥
   const v = s.methods.vlm, cv = current.methods.vlm;
