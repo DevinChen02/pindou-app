@@ -1,6 +1,6 @@
 // Service Worker：把应用文件缓存到手机上，没网也能打开（云端大模型识别仍需联网）。
 // 每次发布新版本时把 VERSION 改一下，手机会在下次打开时更新。
-const VERSION = 'pindou-v1.2.0';
+const VERSION = 'pindou-v1.3.0';
 const SHELL = [
   './',
   './index.html',
@@ -20,6 +20,7 @@ const SHELL = [
   './js/extract/text.js',
   './js/views/recognize.js',
   './js/views/verify.js',
+  './js/views/overview.js',
   './js/views/preview.js',
   './js/views/inventory.js',
   './js/views/history.js',

@@ -4,6 +4,7 @@ import { hexOf } from '../palette.js';
 import { colorCheck, itemIssues, totalsCheck, newId } from '../extract/index.js';
 import * as store from '../store.js';
 import { openImageViewer, entriesFromImages, hasViewable } from '../viewer.js';
+import { renderOverview, hasOverview } from './overview.js';
 
 function issueLevel(item, s) {
   const is = itemIssues(item, s);
@@ -15,6 +16,10 @@ function issueLevel(item, s) {
 export async function renderVerify(app) {
   const s = app.rec.session;
   if (!s) { app.rec.step = 'pick'; return app.render(); }
+  if (s.mode === 'overview') {
+    if (hasOverview(s)) return renderOverview(app, { discard });
+    s.mode = s.items.length ? 'card' : 'list';
+  }
   if (s.mode === 'list' || !s.items.length) return renderList(app);
   return renderCard(app);
 }
@@ -39,6 +44,7 @@ function renderCard(app) {
   const doneN = s.items.filter(i => i.verified).length;
   app.setTitle('逐项核对');
   app.setBack(() => discard(app));
+  if (hasOverview(s)) app.actions.append(h('button.btn.sm.soft', { onclick: () => { s.mode = 'overview'; app.saveSession(); app.render(); } }, '总览'));
   app.actions.append(h('button.btn.sm.soft', { onclick: () => { s.mode = 'list'; app.saveSession(); app.render(); } }, '列表'));
   const view = clear(app.view);
 
@@ -216,6 +222,7 @@ function renderList(app) {
   const s = app.rec.session;
   app.setTitle('核对结果');
   app.setBack(() => discard(app));
+  if (hasOverview(s)) app.actions.append(h('button.btn.sm.soft', { onclick: () => { s.mode = 'overview'; app.saveSession(); app.render(); } }, '总览'));
   if (s.items.length) app.actions.append(h('button.btn.sm.soft', { onclick: () => { s.mode = 'card'; const k = s.items.findIndex(i => !i.verified); s.cursor = k >= 0 ? k : 0; app.saveSession(); app.render(); } }, '逐项'));
   const view = clear(app.view);
   const t = totalsCheck(s);

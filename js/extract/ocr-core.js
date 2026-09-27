@@ -291,8 +291,24 @@ export function analyze(img) {
  * 裁出一个词，放大到目标字高，二值化成“白底黑字”，四周留白。
  * ana 为 analyze() 的返回值。返回 ImageData 形状对象。
  */
+/**
+ * 按这个词自己的“墨色深浅”定阈值：取框内 D 的 95 分位的一半。
+ * 低分辨率 JPEG 里细字边缘发虚，全局阈值会把笔画描粗（A8 糊成一团、G15 读成 618），自适应阈值更清楚。
+ */
+export function autoT(ana, box) {
+  const { D } = ana, W = ana.width;
+  const vals = [];
+  const step = Math.max(1, Math.floor((box.x1 - box.x0) * (box.y1 - box.y0) / 4000));
+  let k = 0;
+  for (let y = box.y0; y < box.y1; y++) for (let x = box.x0; x < box.x1; x++) if (k++ % step === 0) vals.push(D[y * W + x]);
+  if (!vals.length) return ana.T;
+  vals.sort((a, b) => a - b);
+  return Math.max(12, vals[Math.floor(vals.length * 0.95)] * 0.5);
+}
+
 export function wordImage(ana, box, targetH = 40, T = ana.T, blur = false, spread = 0) {
   const { D } = ana;
+  if (T === 'auto') T = autoT(ana, box);
   const hc = box.hc || ana.hc;
   const W = ana.width, H = ana.height;
   const pad = Math.round(hc * 0.25);
@@ -365,6 +381,7 @@ function boxBlur(img) {
 
 /** 逐词识别时依次尝试的参数；前一个读不出/置信度低就换下一个 */
 export const OCR_ATTEMPTS = [
+  { psm: '7', th: 36, T: 'auto', blur: true }, // 每个词自适应阈值（低清 JPEG 细字更准）
   { psm: '7', th: 36, T: null, blur: true },
   { psm: '7', th: 36, T: null, blur: true, spread: 0.35 },
   { psm: '8', th: 44, T: 55, blur: true },
@@ -396,6 +413,31 @@ const COUNT_RE = /^[xX×*]?\(?(\d{1,5})\)?$/;
  * normalizeCode: palette.normalizeCode
  * 返回 [{ code, rawCode, count, codeBox, countBox, uncertain }]
  */
+const RULER = Array.from({ length: 99 }, (_, i) => i + 1).join('');
+/** 这一串数字像不像坐标刻度连起来读出的（67891、1011121314…）；带括号/x 的是数量，不算 */
+function rulerLike(t) {
+  const raw = String(t.raw ?? t.text ?? '');
+  if (/[()xX×*]/.test(raw)) return 0;
+  const d = raw.replace(/\D/g, '');
+  return d.length >= 4 && RULER.includes(d) ? d.length : 0;
+}
+function dropRulerRows(codes, counts, amb, junk) {
+  const all = [...codes, ...counts, ...amb, ...junk];
+  const rows = [];
+  for (const t of all) {
+    const h = Math.max(4, t.y1 - t.y0), cy = (t.y0 + t.y1) / 2;
+    const r = rows.find(r => Math.abs(r.cy - cy) < Math.max(r.h, h) * 0.5);
+    if (r) r.items.push(t); else rows.push({ cy, h, items: [t] });
+  }
+  const bad = new Set();
+  for (const r of rows) {
+    const lens = r.items.map(t => rulerLike({ raw: String(t.text || '').replace(/\s+/g, '') })).filter(Boolean);
+    if (lens.length >= 2 || lens.some(n => n >= 5)) for (const t of r.items) bad.add(t);
+  }
+  if (!bad.size) return;
+  for (const list of [codes, counts, amb]) for (let i = list.length - 1; i >= 0; i--) if (bad.has(list[i])) list.splice(i, 1);
+}
+
 export function pairWords(words, normalizeCode) {
   const codes = [], counts = [], amb = [], junk = [];
   for (const wd of words) {
@@ -423,6 +465,8 @@ export function pairWords(words, normalizeCode) {
     if (/^[A-Za-z]{1,3}[0-9A-Za-z]{1,3}$/.test(t) && /\d/.test(t)) codes.push({ ...wd, raw: t, code: null });
     else junk.push({ ...wd, raw: t });
   }
+  // 格子边上的坐标刻度（1 2 3 … 71）常被框进清单，读成 “P1 234”“67891” 这种：整行丢掉
+  dropRulerRows(codes, counts, amb, junk);
   for (const a of amb) {
     const h = Math.max(4, a.y1 - a.y0), cy = (a.y0 + a.y1) / 2, cx = (a.x0 + a.x1) / 2;
     const rowOf = t => Math.abs((t.y0 + t.y1) / 2 - cy) < h * 0.5;
@@ -510,6 +554,7 @@ export function pairWords(words, normalizeCode) {
   const usedJ = new Set();
   counts.forEach((t, j) => {
     if (pairedT.has(j) || (support[j] === 1 && medSupport >= 3) || support[j] < maxSupport * 0.5) return;
+    if (t.conf != null && t.conf < 40) return; // 把握太低的孤立数字多半是水印里的字
     const h = Math.max(4, t.y1 - t.y0), tcx = (t.x0 + t.x1) / 2, tcy = (t.y0 + t.y1) / 2;
     let bestK = -1, bestCost = Infinity;
     junk.forEach((c, k) => {

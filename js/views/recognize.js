@@ -178,7 +178,8 @@ export function startSession(app, { method, images, items, statedTotal, statedCo
     id: newId(), createdAt: Date.now(), method,
     name: `图纸 ${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`,
     images, items, statedTotal: statedTotal || null, statedColors: statedColors || null,
-    cursor: 0, mode: items.length ? 'card' : 'list', rawText: rawText || null,
+    // 有位置信息时先看“识别总览”（框出每一项，看漏了哪个），再逐项核对
+    cursor: 0, mode: items.some(i => i.box && i.img != null) ? 'overview' : items.length ? 'card' : 'list', rawText: rawText || null,
   };
   app.rec.step = 'verify';
   app.saveSession();

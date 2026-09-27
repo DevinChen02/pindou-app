@@ -48,10 +48,12 @@ const union = (a, b) => (!a ? b : !b ? a : { x0: Math.min(a.x0, b.x0), y0: Math.
 
 /**
  * 打开看图器。
- * entries: [{ name, views: [{ key, label, src | load(), w, h, box?, box2? }] }]
- * opts: { index: 第几条, view: 'legend' | 'full'（优先打开的视图）, focus: 有框时是否先放大到框 }
+ * entries: [{ name, views: [{ key, label, src | load(), w, h, box?, box2?, marks? }] }]
+ *   marks: [{ x0, y0, x1, y1, label, tone: 'ok'|'warn'|'bad' }] 额外画出的一组框（识别总览用）
+ * opts: { index: 第几条, view: 'legend' | 'full'（优先打开的视图）, focus: 有框时是否先放大到框,
+ *         onTap({ x, y, entry, view, close }): 单击图片时回调（图片坐标）, hint: 底部提示文字 }
  */
-export function openImageViewer(entries, { index = 0, view = 'full', focus = true } = {}) {
+export function openImageViewer(entries, { index = 0, view = 'full', focus = true, onTap = null, hint: hintText = '双指缩放 · 拖动 · 双击放大' } = {}) {
   entries = (entries || []).filter(e => e.views?.length);
   if (!entries.length) { toast('没有可以查看的图片'); return null; }
   let ei = clamp(index, 0, entries.length - 1);
@@ -61,9 +63,10 @@ export function openImageViewer(entries, { index = 0, view = 'full', focus = tru
   const imgEl = h('img', { alt: '', draggable: false });
   const hl = h('div.pz-hl', { hidden: true });
   const hl2 = h('div.pz-hl.dash', { hidden: true });
-  const layer = h('div.pz-layer', imgEl, hl, hl2);
+  const marksEl = h('div.pz-marks');
+  const layer = h('div.pz-layer', imgEl, marksEl, hl, hl2);
   const msg = h('div.pz-msg', { hidden: true });
-  const hint = h('div.pz-hint', '双指缩放 · 拖动 · 双击放大');
+  const hint = h('div.pz-hint', hintText);
   const stage = h('div.pz-stage', layer, msg, hint);
 
   const title = h('div.pz-title');
@@ -166,6 +169,11 @@ export function openImageViewer(entries, { index = 0, view = 'full', focus = tru
       imgEl.style.width = st.w + 'px';
       imgEl.style.height = st.h + 'px';
       place(hl, v.box); place(hl2, v.box2);
+      marksEl.replaceChildren(...(v.marks || []).map(m => {
+        const el = h('div.pz-mark.' + (m.tone || 'ok'), m.label ? h('span', m.label) : null);
+        place(el, m);
+        return el;
+      }));
       setLimits();
       msg.hidden = true;
       layer.style.visibility = '';
@@ -183,7 +191,7 @@ export function openImageViewer(entries, { index = 0, view = 'full', focus = tru
 
   // ---- 手势：Pointer Events（iPhone Safari 13+ 支持） ----
   const pts = new Map();
-  let g = null, moved = false, multi = false, lastTap = { t: 0, x: 0, y: 0 };
+  let g = null, moved = false, multi = false, lastTap = { t: 0, x: 0, y: 0 }, tapTimer = null;
   const pos = e => { const r = stage.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
   const mid = p => p.length > 1 ? { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 } : p[0];
   const dist = p => Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
@@ -225,8 +233,17 @@ export function openImageViewer(entries, { index = 0, view = 'full', focus = tru
     const now = Date.now();
     if (now - lastTap.t < 320 && Math.hypot(p.x - lastTap.x, p.y - lastTap.y) < 40) {
       lastTap.t = 0;
+      clearTimeout(tapTimer);
       if (st.s > st.fit * 1.3) fitAll(); else zoomAt(st.fit * 3, p.x, p.y);
-    } else lastTap = { t: now, x: p.x, y: p.y };
+    } else {
+      lastTap = { t: now, x: p.x, y: p.y };
+      if (onTap) {
+        // 等一下看是不是双击；不是才算单击
+        const ix = (p.x - st.tx) / st.s, iy = (p.y - st.ty) / st.s;
+        clearTimeout(tapTimer);
+        tapTimer = setTimeout(() => onTap({ x: ix, y: iy, entry: entries[ei], view: curView(), close }), 300);
+      }
+    }
   };
   stage.addEventListener('pointerup', end);
   stage.addEventListener('pointercancel', end);
@@ -257,6 +274,7 @@ export function openImageViewer(entries, { index = 0, view = 'full', focus = tru
   document.body.append(root);
   function close() {
     token++;
+    clearTimeout(tapTimer);
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('resize', onResize);
     if (!hadNoScroll) document.body.classList.remove('noscroll');
