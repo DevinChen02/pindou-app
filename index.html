@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="拼豆计数器">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#f6f4f0" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#18181a" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/app.css">
+<title>拼豆计数器</title>
+</head>
+<body>
+<header id="topbar">
+  <button id="back-btn" class="icon-btn" aria-label="返回" hidden>
+    <svg viewBox="0 0 24 24" width="22" height="22"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+  <h1 id="title">拼豆计数器</h1>
+  <div id="top-actions"></div>
+</header>
+<main id="view"><div class="loading">加载中…</div></main>
+<nav id="tabbar">
+  <button data-tab="recognize" aria-label="识别">
+    <svg viewBox="0 0 24 24"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="9.5" cy="10" r="1.6" fill="currentColor"/><circle cx="14.5" cy="10" r="1.6" fill="currentColor"/><circle cx="9.5" cy="14.5" r="1.6" fill="currentColor"/><circle cx="14.5" cy="14.5" r="1.6" fill="currentColor"/></svg>
+    <span>识别</span>
+  </button>
+  <button data-tab="inventory" aria-label="库存">
+    <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><rect x="13" y="4" width="7" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><rect x="4" y="13" width="7" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><rect x="13" y="13" width="7" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+    <span>库存</span><i class="badge" id="low-badge" hidden></i>
+  </button>
+  <button data-tab="history" aria-label="历史">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 8v4.5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <span>历史</span>
+  </button>
+  <button data-tab="settings" aria-label="设置">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <span>设置</span>
+  </button>
+</nav>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

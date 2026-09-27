@@ -1,0 +1,17 @@
+{
+  "name": "拼豆计数器",
+  "short_name": "拼豆计数器",
+  "description": "识别拼豆图纸的色号清单，管理自己的豆子库存。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f6f4f0",
+  "theme_color": "#f6f4f0",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

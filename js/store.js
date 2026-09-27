@@ -1,0 +1,271 @@
+// 业务逻辑：设置、库存增减（带流水，可撤销）、图纸、备份。
+import * as db from './db.js';
+import { PALETTE, isCode, codeCompare } from './palette.js';
+
+export const DEFAULT_MODELS = {
+  anthropic: 'claude-sonnet-5',
+  openai: 'gpt-5.5',
+  gemini: 'gemini-3.8-flash',
+};
+
+export const DEFAULT_SETTINGS = {
+  methods: {
+    vlm: {
+      enabled: false,
+      provider: 'anthropic',        // anthropic | openai | gemini
+      mode: 'direct',               // direct（手机直连）| proxy（Cloudflare Worker 代理）
+      apiKeys: { anthropic: '', openai: '', gemini: '' },
+      models: { ...DEFAULT_MODELS },
+      workerUrl: '',
+      workerToken: '',
+      twoPass: true,                // 先定位清单、再放大读取
+    },
+    ocr: { enabled: false, basePath: './vendor/tesseract/' },
+    text: { enabled: true },
+  },
+  defaultMethod: 'text',
+  defaultThreshold: 100,
+  lossPercent: 0,
+  restockPresets: [100, 500, 1000],
+};
+
+function merge(base, over) {
+  if (Array.isArray(base)) return Array.isArray(over) ? over : base;
+  if (base && typeof base === 'object') {
+    const out = { ...base };
+    for (const k of Object.keys(over || {})) out[k] = k in base ? merge(base[k], over[k]) : over[k];
+    return out;
+  }
+  return over === undefined ? base : over;
+}
+
+let settingsCache = null;
+export async function getSettings() {
+  if (settingsCache) return settingsCache;
+  const rec = await db.get('kv', 'settings');
+  settingsCache = merge(structuredClone(DEFAULT_SETTINGS), rec?.value || {});
+  return settingsCache;
+}
+export async function saveSettings(s) {
+  settingsCache = s;
+  await db.put('kv', { key: 'settings', value: s });
+}
+
+export const METHOD_NAMES = { vlm: '云端大模型', ocr: '离线 OCR', text: '实况文本 / 快捷指令' };
+
+export function enabledMethods(s) {
+  return ['vlm', 'ocr', 'text'].filter(m => s.methods[m].enabled);
+}
+
+// ---------- 库存 ----------
+
+export async function getInventory() {
+  const all = await db.getAll('colors');
+  return new Map(all.map(r => [r.code, r]));
+}
+
+export function stockOf(inv, code) { return inv.get(code)?.stock ?? 0; }
+
+export function thresholdOf(inv, code, settings) {
+  const t = inv.get(code)?.threshold;
+  return t == null || t === '' ? settings.defaultThreshold : t;
+}
+
+/** 需要颗数 = 图纸数量 ×（1 + 损耗%），向上取整 */
+export function needOf(count, settings) {
+  return Math.ceil(count * (1 + (Number(settings.lossPercent) || 0) / 100));
+}
+
+/**
+ * 预览：每个色号 需要 / 现有 / 拼后剩余 / 状态
+ * status: 'short'（不够）| 'low'（够，但拼完低于阈值）| 'ok'
+ */
+export function previewRows(items, inv, settings) {
+  const merged = new Map();
+  for (const it of items) merged.set(it.code, (merged.get(it.code) || 0) + it.count);
+  const rows = [...merged].map(([code, count]) => {
+    const need = needOf(count, settings);
+    const stock = stockOf(inv, code);
+    const after = stock - need;
+    const threshold = thresholdOf(inv, code, settings);
+    const status = after < 0 ? 'short' : after < threshold ? 'low' : 'ok';
+    return { code, count, need, stock, after, threshold, status };
+  });
+  const order = { short: 0, low: 1, ok: 2 };
+  rows.sort((a, b) => order[a.status] - order[b.status] || codeCompare(a.code, b.code));
+  return rows;
+}
+
+/** 低于阈值的颜色（用于“待补货”） */
+export function lowStockList(inv, settings, onlyOwned = false) {
+  const out = [];
+  for (const code of PALETTE.keys()) {
+    const rec = inv.get(code);
+    if (onlyOwned && !rec) continue;
+    if (!rec) continue; // 从没录入过的颜色不算“待补货”
+    const stock = rec.stock ?? 0;
+    const threshold = thresholdOf(inv, code, settings);
+    if (stock < threshold) out.push({ code, stock, threshold });
+  }
+  return out;
+}
+
+/**
+ * 原子地改库存并记一条流水。
+ * changes: [{ code, delta }]（加减）或 [{ code, set }]（设为）
+ * 如果 forbidNegative 且有颜色会变成负数，整笔操作取消并抛错（err.shortages 列出缺口）。
+ */
+export async function applyChanges(changesIn, { type, note = '', patternId = null, forbidNegative = false, extra = {} } = {}) {
+  const time = Date.now();
+  // 同一色号出现多次时合并
+  const byCode = new Map();
+  for (const ch of changesIn) {
+    const prev = byCode.get(ch.code);
+    if (ch.set != null) byCode.set(ch.code, { code: ch.code, set: ch.set });
+    else if (prev && prev.set != null) prev.set += ch.delta;
+    else byCode.set(ch.code, { code: ch.code, delta: (prev?.delta || 0) + ch.delta });
+  }
+  const changes = [...byCode.values()];
+  return db.transaction(['colors', 'transactions', 'patterns'], (t, done, abort) => {
+    const cs = t.objectStore('colors');
+    const deltas = [];
+    let pending = changes.length;
+    const shortages = [];
+    if (!pending) { abort(new Error('没有要修改的颜色')); return; }
+    const finish = () => {
+      if (shortages.length && forbidNegative) {
+        const e = new Error('库存不足：' + shortages.map(s => `${s.code} 缺 ${-s.after}`).join('，'));
+        e.shortages = shortages;
+        abort(e);
+        return;
+      }
+      for (const d of deltas) {
+        cs.put({ ...d.rec, code: d.code, stock: d.after, updatedAt: time });
+      }
+      const txRec = {
+        time, type, note, patternId,
+        deltas: deltas.map(d => ({ code: d.code, delta: d.after - d.before, before: d.before, after: d.after })),
+        ...extra,
+      };
+      const r = t.objectStore('transactions').add(txRec);
+      r.onsuccess = () => {
+        done(r.result);
+        if (patternId != null && type === 'consume') {
+          const ps = t.objectStore('patterns');
+          const g = ps.get(patternId);
+          g.onsuccess = () => { if (g.result) ps.put({ ...g.result, status: 'done', txId: r.result, doneAt: time }); };
+        }
+      };
+    };
+    for (const ch of changes) {
+      if (!isCode(ch.code)) { abort(new Error(`未知色号 ${ch.code}`)); return; }
+      const g = cs.get(ch.code);
+      g.onsuccess = () => {
+        const rec = g.result || { code: ch.code, stock: 0, threshold: null };
+        const before = rec.stock ?? 0;
+        const after = ch.set != null ? Math.max(0, Math.round(ch.set)) : before + Math.round(ch.delta);
+        if (after < 0) shortages.push({ code: ch.code, before, after });
+        deltas.push({ code: ch.code, rec, before, after });
+        if (--pending === 0) finish();
+      };
+    }
+  });
+}
+
+/** 确认拼豆：按图纸扣库存。不够就整笔取消。 */
+export async function commitPattern(patternId, rows) {
+  return applyChanges(rows.map(r => ({ code: r.code, delta: -r.need })), {
+    type: 'consume', patternId, forbidNegative: true,
+  });
+}
+
+/** 撤销一笔流水（把它的变化反向加回去） */
+export async function undoTransaction(txId) {
+  const tx = await db.get('transactions', txId);
+  if (!tx) throw new Error('找不到这笔记录');
+  if (tx.undone) throw new Error('这笔记录已经撤销过了');
+  const id = await applyChanges(tx.deltas.map(d => ({ code: d.code, delta: -d.delta })), {
+    type: 'undo', note: `撤销：${txLabel(tx)}`, extra: { undoOf: txId },
+  });
+  await db.put('transactions', { ...tx, undone: true, undoneBy: id });
+  if (tx.patternId != null) {
+    const p = await db.get('patterns', tx.patternId);
+    if (p) await db.put('patterns', { ...p, status: 'pending', txId: null });
+  }
+  return id;
+}
+
+export async function setThreshold(code, threshold) {
+  const rec = (await db.get('colors', code)) || { code, stock: 0 };
+  await db.put('colors', { ...rec, threshold: threshold === '' || threshold == null ? null : Math.max(0, Math.round(threshold)), updatedAt: Date.now() });
+}
+
+export const TX_TYPES = { consume: '拼豆扣减', restock: '补货', adjust: '手动调整', undo: '撤销', import: '批量录入' };
+
+export function txLabel(tx) {
+  const n = tx.deltas.reduce((s, d) => s + d.delta, 0);
+  return `${TX_TYPES[tx.type] || tx.type}${tx.note ? ' · ' + tx.note : ''}（${tx.deltas.length} 色，${n > 0 ? '+' : ''}${n} 颗）`;
+}
+
+export async function listTransactions() {
+  const all = await db.getAll('transactions');
+  return all.sort((a, b) => b.time - a.time);
+}
+
+// ---------- 图纸 ----------
+
+export async function savePattern(p) {
+  const rec = { createdAt: Date.now(), status: 'pending', ...p };
+  const id = await db.put('patterns', rec);
+  return id;
+}
+export async function getPattern(id) { return db.get('patterns', id); }
+export async function updatePattern(p) { return db.put('patterns', p); }
+export async function listPatterns() {
+  const all = await db.getAll('patterns');
+  return all.sort((a, b) => b.createdAt - a.createdAt);
+}
+export async function deletePattern(id) { return db.del('patterns', id); }
+
+// ---------- 未完成的核对（防止切到相册看原图时 App 被系统回收） ----------
+
+export async function saveSession(s) { await db.put('kv', { key: 'session', value: s }); }
+export async function loadSession() { return (await db.get('kv', 'session'))?.value || null; }
+export async function clearSession() { await db.del('kv', 'session'); }
+
+// ---------- 备份 ----------
+
+export async function exportData({ includeSecrets = false } = {}) {
+  const settings = structuredClone(await getSettings());
+  if (!includeSecrets) {
+    settings.methods.vlm.apiKeys = { anthropic: '', openai: '', gemini: '' };
+    settings.methods.vlm.workerToken = '';
+  }
+  return {
+    app: 'pindou-counter', version: 1, exportedAt: new Date().toISOString(),
+    colors: await db.getAll('colors'),
+    patterns: await db.getAll('patterns'),
+    transactions: await db.getAll('transactions'),
+    settings,
+  };
+}
+
+export async function importData(data) {
+  if (!data || data.app !== 'pindou-counter') throw new Error('这不是拼豆计数器的备份文件');
+  const current = await getSettings();
+  await db.clearAll();
+  for (const c of data.colors || []) await db.put('colors', c);
+  for (const p of data.patterns || []) await db.put('patterns', p);
+  for (const t of data.transactions || []) await db.put('transactions', t);
+  const s = merge(structuredClone(DEFAULT_SETTINGS), data.settings || {});
+  // 备份里没带密钥时，保留当前手机上的密钥
+  const v = s.methods.vlm, cv = current.methods.vlm;
+  for (const k of Object.keys(v.apiKeys)) if (!v.apiKeys[k]) v.apiKeys[k] = cv.apiKeys[k] || '';
+  if (!v.workerToken) v.workerToken = cv.workerToken || '';
+  await saveSettings(s);
+}
+
+export async function resetAll() {
+  await db.clearAll();
+  settingsCache = null;
+}
