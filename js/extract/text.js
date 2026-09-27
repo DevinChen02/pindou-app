@@ -23,13 +23,13 @@ export function parseStatedTotals(text) {
 function classify(tok) {
   if (SKIP_WORDS.test(tok)) return { kind: 'skip', raw: tok };
   // 粘连：A11x68、H2(2606)、E1:4
-  const g = tok.match(/^([A-Za-z][0-9OoIlSZ]{1,2})[:：]?[xX×*(]+(\d{1,5})\)?$/);
+  const g = tok.match(/^([A-Za-z]{1,3}[0-9OoIlSZ]{1,3})[:：]?[xX×*(]+(\d{1,5})\)?$/);
   if (g && normalizeCode(g[1])) return { kind: 'pair', code: normalizeCode(g[1]), count: +g[2], raw: tok };
   const c = tok.match(/^[xX×*]?\(?(\d{1,5})\)?$/);
   if (c) return { kind: 'count', n: +c[1], prefixed: /^[xX×*(]/.test(tok), raw: tok };
   const code = normalizeCode(tok);
   if (code && /[A-Za-z]/.test(tok)) return { kind: 'code', code, raw: tok };
-  if (/^[A-Za-z][0-9A-Za-z]{1,2}$/.test(tok)) return { kind: 'badcode', raw: tok };
+  if (/^[A-Za-z]{1,3}[0-9A-Za-z]{1,3}$/.test(tok) && /\d/.test(tok)) return { kind: 'badcode', raw: tok };
   return { kind: 'other', raw: tok };
 }
 
@@ -52,7 +52,7 @@ export function parseLegendText(text) {
   const toks = [];
   for (const line of norm.split(/\r?\n/)) {
     const parts = line
-      .replace(/([A-Za-z]\d{1,2})\s*\(\s*(\d+)\s*\)/g, '$1($2)')
+      .replace(/([A-Za-z]{1,3}\d{1,3})\s*\(\s*(\d+)\s*\)/g, '$1($2)')
       .replace(/\b([xX])\s+(\d)/g, '$1$2')
       .split(/[\s,，、;；|/]+/).filter(Boolean);
     for (const p of parts) toks.push(classify(p));

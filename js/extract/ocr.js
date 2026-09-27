@@ -1,6 +1,6 @@
 // 离线 OCR：浏览器里跑 Tesseract（随应用一起部署在 vendor/tesseract/，首次加载后可离线使用）。
 import { analyze, wordImage, pairWords, OCR_ATTEMPTS, plausibleToken, lengthMatches } from './ocr-core.js';
-import { normalizeCode } from '../palette.js';
+import { normalizeCode, ocrWhitelist } from '../palette.js';
 import { getImageData, makeCanvas } from '../image.js';
 
 let workerPromise = null;
@@ -31,7 +31,7 @@ export async function getWorker(basePath, onProgress) {
       logger: m => onProgress?.(m),
     });
     await worker.setParameters({
-      tessedit_char_whitelist: 'ABCDEFGHMx0123456789()',
+      tessedit_char_whitelist: ocrWhitelist(),
       tessedit_pageseg_mode: '7',
       debug_file: '/dev/null',
     });
@@ -56,6 +56,7 @@ export async function ocrExtract(settings, canvas, rect, { onStatus, signal } = 
   const worker = await getWorker(settings.basePath, m => {
     if (m.status && m.progress != null && m.progress < 1) onStatus?.(`加载离线 OCR 引擎…${Math.round(m.progress * 100)}%`);
   });
+  await worker.setParameters({ tessedit_char_whitelist: ocrWhitelist() }); // 色卡可能被改过
   onStatus?.('分析清单区域…');
   const img = getImageData(canvas, rect);
   const ana = analyze({ data: img.data, width: img.width, height: img.height });

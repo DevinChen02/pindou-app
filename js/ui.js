@@ -1,5 +1,5 @@
 // 小型 UI 工具：创建元素、提示、底部弹层、确认框、色号选择器。
-import { PALETTE, SERIES, hexOf, inkFor, isCode, normalizeCode } from './palette.js';
+import { PALETTE, SERIES, hexOf, inkFor, isCode, normalizeCode, SERIES_NAMES } from './palette.js';
 
 /** h('div.card#id', {onclick, style:{...}, ...attrs}, ...children) */
 export function h(sel, attrs, ...children) {
@@ -19,6 +19,7 @@ export function h(sel, attrs, ...children) {
     else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
     else if (k === 'class') el.className += ' ' + v;
     else if (k === 'html') el.innerHTML = v;
+    else if (k === 'value') el.value = v; // textarea 只认属性，不认 value 特性
     else if (k in el && typeof v !== 'string') el[k] = v;
     else el.setAttribute(k, v === true ? '' : v);
   }
@@ -88,7 +89,7 @@ export function chip(code, { size = 'md', label = code, rgb } = {}) {
 /** 色号选择器（按系列分页 + 直接输入 + 按颜色推荐） */
 export function pickCode({ current, suggestions = [], title = '选择色号' } = {}) {
   return new Promise(resolve => {
-    let series = isCode(current) ? PALETTE.get(current).series : 'A';
+    let series = isCode(current) ? PALETTE.get(current).series : SERIES[0];
     const grid = h('div.code-grid');
     const tabs = h('div.series-tabs');
     const input = h('input.input', {
@@ -99,7 +100,7 @@ export function pickCode({ current, suggestions = [], title = '选择色号' } =
     const renderGrid = () => {
       clear(tabs);
       for (const s of SERIES) {
-        tabs.appendChild(h('button.tab' + (s === series ? '.on' : ''), { onclick: () => { series = s; renderGrid(); } }, s));
+        tabs.appendChild(h('button.tab' + (s === series ? '.on' : ''), { title: SERIES_NAMES[s] || '', onclick: () => { series = s; renderGrid(); } }, s));
       }
       clear(grid);
       for (const p of PALETTE.values()) {
@@ -115,7 +116,7 @@ export function pickCode({ current, suggestions = [], title = '选择色号' } =
       h('div.row.gap', input, h('button.btn.primary', {
         onclick: () => {
           const c = normalizeCode(input.value);
-          if (c) s.close(c); else hint.textContent = `“${input.value}” 不在 MARD 221 色卡里`;
+          if (c) s.close(c); else hint.textContent = `“${input.value}” 不在当前色卡里（可在 设置 → 色卡管理 里添加）`;
         },
       }, '确定')),
       hint, tabs, grid,

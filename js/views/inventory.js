@@ -1,6 +1,6 @@
 // “库存”标签：每个色号还剩多少、待补货、补货/盘点、批量录入。
 import { h, clear, toast, sheet, chip, fmtNum, fmtTime, confirmDialog } from '../ui.js';
-import { PALETTE, SERIES, hexOf, normalizeCode } from '../palette.js';
+import { PALETTE, SERIES, hexOf, normalizeCode, seriesLabel } from '../palette.js';
 import { parseLegendText } from '../extract/text.js';
 import * as store from '../store.js';
 
@@ -45,10 +45,10 @@ export async function renderInventory(app) {
   search.addEventListener('input', () => { ui.q = search.value; draw(); });
 
   const filters = h('div.filters',
-    [['owned', `有库存 ${ownedN}`], ['low', `待补货 ${lows.length}`], ['all', '全部 221']].map(([k, label]) =>
+    [['owned', `有库存 ${ownedN}`], ['low', `待补货 ${lows.length}`], ['all', `全部 ${PALETTE.size}`]].map(([k, label]) =>
       h('button' + (ui.filter === k ? '.on' : ''), { onclick: () => { ui.filter = k; app.rerender(); } }, label)),
     h('span', { style: { width: '8px', flexShrink: 0 } }),
-    ['all', ...SERIES].map(sr => h('button' + (ui.series === sr ? '.on' : ''), { onclick: () => { ui.series = sr; app.rerender(); } }, sr === 'all' ? '全系列' : sr)));
+    ['all', ...SERIES].map(sr => h('button' + (ui.series === sr ? '.on' : ''), { onclick: () => { ui.series = sr; app.rerender(); } }, sr === 'all' ? '全系列' : seriesLabel(sr))));
 
   view.append(h('div.inv-tools', search, filters));
   if (lows.length && ui.filter !== 'low') {
@@ -113,7 +113,7 @@ function batchSheet(app) {
     for (const [k, label] of [['add', '补货（加上）'], ['set', '盘点（设为）']]) seg.append(h('button' + (mode === k ? '.on' : ''), { onclick: () => { mode = k; renderSeg(); } }, label));
   };
   renderSeg();
-  const seriesSel = h('select.input', ['全部 221 色', ...SERIES.map(s => `${s} 系列`)].map((l, i) => h('option', { value: i ? SERIES[i - 1] : 'all' }, l)));
+  const seriesSel = h('select.input', [`全部 ${PALETTE.size} 色`, ...SERIES.map(s => `${seriesLabel(s)} 系列`)].map((l, i) => h('option', { value: i ? SERIES[i - 1] : 'all' }, l)));
   const seriesVal = h('input.input', { type: 'number', inputmode: 'numeric', placeholder: '颗数', style: { width: '100px' } });
   const sh = sheet([
     h('p.small.muted', '适合第一次录入或一次买了很多颜色。支持直接粘贴“色号 数量”列表。'),

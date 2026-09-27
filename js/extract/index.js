@@ -118,7 +118,7 @@ export function colorCheck(item) {
 /** 一条记录的问题列表（用于标黄/标红） */
 export function itemIssues(item, session) {
   const out = [];
-  if (!item.code) out.push({ level: 'error', text: item.rawCode ? `“${item.rawCode}” 不是有效的 MARD 色号，请选择正确色号` : '色号没读出来，请选择色号' });
+  if (!item.code) out.push({ level: 'error', text: item.rawCode ? `“${item.rawCode}” 不在当前色卡里，请选择正确色号` : '色号没读出来，请选择色号' });
   if (item.count == null || !(item.count > 0)) out.push({ level: 'error', text: '数量没读出来，请填写' });
   if (item.code) {
     const dup = session.items.filter(o => o.code === item.code && o.img === item.img);

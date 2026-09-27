@@ -3,6 +3,8 @@ import { h, clear, toast, confirmDialog, shareFile } from '../ui.js';
 import * as store from '../store.js';
 import { testConnection } from '../extract/vlm.js';
 import { testOcr } from '../extract/ocr.js';
+import { renderPaletteManager } from './palette.js';
+import { PALETTE, SERIES } from '../palette.js';
 
 const PROVIDERS = {
   anthropic: { name: 'Claude', full: 'Anthropic Claude', keyHint: 'sk-ant-…', where: 'platform.claude.com → API Keys' },
@@ -14,6 +16,7 @@ const PROVIDERS = {
 const draft = { vlm: null, ocr: null, open: {} };
 
 export async function renderSettings(app) {
+  if (app.settingsPage === 'palette') return renderPaletteManager(app);
   app.setTitle('设置');
   const s = app.settings;
   const view = clear(app.view);
@@ -28,6 +31,7 @@ export async function renderSettings(app) {
     view.append(h('div.card', h('div.kv', h('div', h('div.k', '默认识别方法'), h('div.d', '打开“识别”时默认选中')), sel)));
   }
 
+  view.append(h('div.section-title', '色卡'), paletteCard(app));
   view.append(h('div.section-title', '库存'), inventoryCard(app));
   view.append(h('div.section-title', '数据与备份'), dataCard(app));
   view.append(h('div.section-title', '关于'), aboutCard());
@@ -235,6 +239,21 @@ function textCard(app) {
     cfg.enabled ? h('div.mbody', h('p.small.muted', '使用方法见“识别”页里的“怎样把截图里的字拷贝出来？”。')) : null);
 }
 
+// ---------- 色卡 ----------
+
+function paletteCard(app) {
+  const d = store.paletteDiff();
+  return h('div.card.click-card', { onclick: () => { app.settingsPage = 'palette'; app.render(); } },
+    h('div.row.gap',
+      h('div.pal-strip', [...PALETTE.values()].filter((_, i) => i % Math.ceil(PALETTE.size / 12) === 0).slice(0, 12)
+        .map(p => h('i', { style: { background: p.hex } }))),
+      h('div.grow',
+        h('div.k', '色卡管理'),
+        h('div.small.muted', `${PALETTE.size} 色 · ${SERIES.length} 个系列` + (d.custom ? ` · 已自定义 ${d.added.length + d.changed.length + d.removed.length} 处` : ' · 内置 MARD 280 色'))),
+      h('span.muted', { style: { fontSize: '22px' } }, '›')),
+    h('div.tiny.muted', { style: { marginTop: '8px' } }, '新增、修改、删除色号和颜色；支持从照片取色、批量导入导出。'));
+}
+
 // ---------- 库存参数 ----------
 
 function inventoryCard(app) {
@@ -310,7 +329,7 @@ function dataCard(app) {
 
 function aboutCard() {
   return h('div.card',
-    h('p', h('b', '拼豆计数器'), h('span.muted.small', '　v1.0 · 仅供个人使用')),
+    h('p', h('b', '拼豆计数器'), h('span.muted.small', '　v1.1 · 仅供个人使用')),
     h('p.small.muted', '所有库存数据只保存在这台手机的浏览器里。请从主屏幕图标打开（和 Safari 里打开的是两份独立的数据）。'),
-    h('p.small.muted', '色卡：MARD 221 色。'));
+    h('p.small.muted', `色卡：${PALETTE.size} 色（${SERIES.join(' ')}）。`));
 }

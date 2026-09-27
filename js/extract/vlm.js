@@ -3,12 +3,13 @@
 //   direct —— 手机直接调用服务商 API，API Key 存在手机本地
 //   proxy  —— 调用你自己部署的 Cloudflare Worker，由 Worker 保管 API Key（见 worker/ 目录）
 import { cropCanvas, fitCanvas, toJpegBase64, makeCanvas } from '../image.js';
+import { codeRuleText } from '../palette.js';
 
 const MAX_SIDE = 1568; // Claude 超过这个长边会被缩小；另外两家也足够
 
-const LEGEND_RULES = `This is a screenshot of a perler / fuse bead pattern (拼豆图纸).
+const legendRules = () => `This is a screenshot of a perler / fuse bead pattern (拼豆图纸).
 Somewhere in it there is a color legend (色号清单): a list of entries, each with a bead color code and the number of beads needed.
-Color codes follow the MARD system: one letter from A B C D E F G H M followed by 1-2 digits (e.g. A11, H7, M15, G21).
+Color codes are a letter prefix followed by digits (e.g. A11, H7, M15, P23, R8). Valid codes in the user's palette: ${codeRuleText()}.
 Counts may be printed as "x68", "×68", "(2606)", "68", or under / beside the color swatch.
 Rules:
 - Read ONLY the legend entries. Ignore codes printed inside the pattern grid cells, row/column index numbers, watermarks, page numbers ("1/5"), author names.
@@ -209,7 +210,7 @@ export async function vlmExtract(cfg, canvas, content, legendRect, { onStatus, s
     const view = fitCanvas(cropCanvas(canvas, content), MAX_SIDE);
     const loc = await callVision(cfg, {
       b64: toJpegBase64(view), schema: LOCATE_SCHEMA, signal,
-      prompt: `${LEGEND_RULES}\n\nTask: locate the color legend. Return "legend_box" = the bounding box that contains ALL legend entries (swatches, codes and counts), as ${cfg.provider === 'gemini' ? '[ymin, xmin, ymax, xmax]' : '[x0, y0, x1, y1]'} normalized to 0-1000 of this image. Also return stated_total and stated_colors (0 if not stated).`,
+      prompt: `${legendRules()}\n\nTask: locate the color legend. Return "legend_box" = the bounding box that contains ALL legend entries (swatches, codes and counts), as ${cfg.provider === 'gemini' ? '[ymin, xmin, ymax, xmax]' : '[x0, y0, x1, y1]'} normalized to 0-1000 of this image. Also return stated_total and stated_colors (0 if not stated).`,
     });
     statedTotal = loc.stated_total || 0;
     statedColors = loc.stated_colors || 0;
@@ -227,7 +228,7 @@ export async function vlmExtract(cfg, canvas, content, legendRect, { onStatus, s
   const view = cropCanvas(canvas, rect, k);
   const res = await callVision(cfg, {
     b64: toJpegBase64(view, 0.92), schema: EXTRACT_SCHEMA, signal,
-    prompt: `${LEGEND_RULES}\n\nTask: extract every legend entry in reading order (left to right, top to bottom).\n${boxNote(cfg.provider)}`,
+    prompt: `${legendRules()}\n\nTask: extract every legend entry in reading order (left to right, top to bottom).\n${boxNote(cfg.provider)}`,
   });
   const items = (res.items || []).map(it => {
     const pb = toPixelBox(it.box, cfg.provider, view.width, view.height);
@@ -261,7 +262,7 @@ export async function testConnection(cfg) {
   const t0 = performance.now();
   const res = await callVision(cfg, {
     b64: toJpegBase64(c), schema: EXTRACT_SCHEMA,
-    prompt: `${LEGEND_RULES}\n\nTask: extract every legend entry.\n${boxNote(cfg.provider)}`,
+    prompt: `${legendRules()}\n\nTask: extract every legend entry.\n${boxNote(cfg.provider)}`,
   });
   const got = (res.items || []).map(i => `${i.code}×${i.count}`).join('、');
   const ok = /H7/i.test(got) && /A11/i.test(got) && /G14/i.test(got);

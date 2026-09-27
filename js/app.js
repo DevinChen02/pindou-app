@@ -6,8 +6,6 @@ import { renderHistory } from './views/history.js';
 import { renderSettings } from './views/settings.js';
 import { clear, toast } from './ui.js';
 
-export const VERSION = '1.0.0';
-
 const views = {
   recognize: renderRecognize,
   inventory: renderInventory,
@@ -74,10 +72,13 @@ export const app = {
 
 document.getElementById('tabbar').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]');
-  if (b) app.go(b.dataset.tab);
+  if (!b) return;
+  if (b.dataset.tab === 'settings') app.settingsPage = null; // 再点一次“设置”回到设置首页
+  app.go(b.dataset.tab);
 });
 
 async function start() {
+  await store.loadPalette();
   try {
     if (navigator.storage?.persist) {
       const persisted = await navigator.storage.persisted?.();

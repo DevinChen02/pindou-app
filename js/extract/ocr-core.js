@@ -151,28 +151,6 @@ export function groupWords(comps, hc) {
   return words.filter(wd => wd.x1 - wd.x0 <= hc * 7 && wd.y1 - wd.y0 >= hc * 0.5);
 }
 
-/** 双线性放大（RGBA） */
-export function upscale(img, s) {
-  const { data, width: w, height: h } = img;
-  const W = Math.round(w * s), H = Math.round(h * s);
-  const out = new Uint8ClampedArray(W * H * 4);
-  for (let Y = 0; Y < H; Y++) {
-    const sy = Math.min(h - 1.001, Math.max(0, (Y + 0.5) / s - 0.5));
-    const iy = Math.floor(sy), fy = sy - iy;
-    for (let X = 0; X < W; X++) {
-      const sx = Math.min(w - 1.001, Math.max(0, (X + 0.5) / s - 0.5));
-      const ix = Math.floor(sx), fx = sx - ix;
-      const p = (iy * w + ix) * 4, q = (Y * W + X) * 4;
-      for (let k = 0; k < 3; k++) {
-        out[q + k] = data[p + k] * (1 - fx) * (1 - fy) + data[p + 4 + k] * fx * (1 - fy)
-          + data[p + w * 4 + k] * (1 - fx) * fy + data[p + w * 4 + 4 + k] * fx * fy;
-      }
-      out[q + 3] = 255;
-    }
-  }
-  return { data: out, width: W, height: H };
-}
-
 /**
  * 按“颜色连成片”的区域分割：大片同色区域（页面底色、色块、表格格子）当背景，
  * 其余像素与“最近的大片区域”的颜色差即为 D（越大越像字）。
@@ -405,7 +383,8 @@ export function plausibleToken(text, normalizeCode) {
   if (!t) return false;
   if (/^[xX×*]?\(?\d{1,5}\)?$/.test(t)) return true;
   if (normalizeCode(t)) return true;
-  return /^([A-Za-z][0-9A-Za-z]{1,2}?)[xX×*(]+(\d{1,5})\)?$/.test(t) && !!normalizeCode(t.match(/^([A-Za-z][0-9A-Za-z]{1,2}?)/)[1]);
+  const g = t.match(/^([A-Za-z]{1,3}[0-9A-Za-z]{1,3}?)[xX×*(]+(\d{1,5})\)?$/);
+  return !!g && !!normalizeCode(g[1]);
 }
 
 // ---------- 词 → (色号, 数量) 配对 ----------
@@ -422,10 +401,10 @@ export function pairWords(words, normalizeCode) {
   for (const wd of words) {
     let t = String(wd.text || '').replace(/\s+/g, '');
     // 去掉首尾杂字符（例如 "(G14" 里多读的括号），但保留数量两边成对的括号
-    if (!/^\(\d+\)$/.test(t)) t = t.replace(/^[^A-Za-z0-9x]+/, '').replace(/[^0-9A-Za-z)]+$/, '').replace(/^([A-Za-z]\d{1,2})\)$/, '$1');
+    if (!/^\(\d+\)$/.test(t)) t = t.replace(/^[^A-Za-z0-9x]+/, '').replace(/[^0-9A-Za-z)]+$/, '').replace(/^([A-Za-z]{1,3}\d{1,3})\)$/, '$1');
     if (!t) { junk.push({ ...wd, raw: '' }); continue; }
     // 色号和数量粘在一起：H2(2606) / A11x68
-    const glued = t.match(/^([A-Za-z][0-9A-Za-z]{1,2}?)[xX×*(]+(\d{1,5})\)?$/);
+    const glued = t.match(/^([A-Za-z]{1,3}[0-9A-Za-z]{1,3}?)[xX×*(]+(\d{1,5})\)?$/);
     if (glued && normalizeCode(glued[1])) {
       const frac = glued[1].length / t.length;
       const mid = wd.x0 + (wd.x1 - wd.x0) * frac;
@@ -441,7 +420,7 @@ export function pairWords(words, normalizeCode) {
     // 纯数字但也能读成色号（像素字体里 G→6、B→8）：先存着，按位置再判断
     if (code && cm) { amb.push({ ...wd, raw: t, code, n: +cm[1] }); continue; }
     if (cm) { counts.push({ ...wd, n: +cm[1], prefixed }); continue; }
-    if (/^[A-Za-z][0-9A-Za-z]{1,2}$/.test(t)) codes.push({ ...wd, raw: t, code: null });
+    if (/^[A-Za-z]{1,3}[0-9A-Za-z]{1,3}$/.test(t) && /\d/.test(t)) codes.push({ ...wd, raw: t, code: null });
     else junk.push({ ...wd, raw: t });
   }
   for (const a of amb) {
@@ -471,7 +450,7 @@ export function pairWords(words, normalizeCode) {
   const codeSupport = codes.map(c => rowSupport(codes, c));
   const maxCodeSupport = Math.max(0, ...codeSupport);
   // 需要“纠错”才能读成色号的（如 EA→E4），可信度低
-  const fixed = codes.map(c => !!c.code && String(c.raw).toUpperCase().replace(/^([A-Z])0+/, '$1') !== c.code);
+  const fixed = codes.map(c => !!c.code && String(c.raw).toUpperCase().replace(/^([A-Z]+)0+/, '$1') !== c.code);
   // 两种版式分别配对：数量在色号“正下方” / “右边同一行”，取置信度总分高的那种
   const candBelow = [], candRight = [];
   codes.forEach((c, i) => {

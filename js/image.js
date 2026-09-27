@@ -27,15 +27,6 @@ export async function loadImageFile(file) {
   }
 }
 
-export async function loadImageDataURL(dataUrl) {
-  const img = new Image();
-  img.src = dataUrl;
-  await img.decode();
-  const c = makeCanvas(img.naturalWidth, img.naturalHeight);
-  c.getContext('2d').drawImage(img, 0, 0);
-  return c;
-}
-
 export function getImageData(canvas, r = { x: 0, y: 0, w: canvas.width, h: canvas.height }) {
   return canvas.getContext('2d', { willReadFrequently: true }).getImageData(Math.round(r.x), Math.round(r.y), Math.max(1, Math.round(r.w)), Math.max(1, Math.round(r.h)));
 }
@@ -168,17 +159,4 @@ export function estimateTextHeightInBoxes(canvas, boxes) {
   if (!hs.length) return null;
   hs.sort((a, b) => a - b);
   return hs[Math.floor(hs.length / 2)];
-}
-
-/** 估计一块区域里文字的像素高度（判断截图是否太糊） */
-export function estimateTextHeight(canvas, r) {
-  const scale = Math.min(1, 1500 / r.w);
-  const c = cropCanvas(canvas, r, scale);
-  const img = getImageData(c);
-  const hc = estimateCharHeight(components(textMask(img, 12), img.width, img.height), img.height);
-  return hc / scale;
-}
-
-export function rgbToHex(rgb) {
-  return '#' + rgb.map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
 }

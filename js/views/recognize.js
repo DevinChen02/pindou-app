@@ -1,5 +1,5 @@
 // “识别”标签：选方法 → 选图/粘贴文字 →（框选清单）→ 识别 → 逐项核对 → 库存预览 → 完成
-import { h, clear, toast, confirmDialog } from '../ui.js';
+import { h, clear, toast } from '../ui.js';
 import * as store from '../store.js';
 import { loadImageFile, contentBounds, cropCanvas, guessLegendRect } from '../image.js';
 import { extractImage, extractText, referenceImage, statedFromImages, newId } from '../extract/index.js';

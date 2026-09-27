@@ -1,6 +1,6 @@
 // 业务逻辑：设置、库存增减（带流水，可撤销）、图纸、备份。
 import * as db from './db.js';
-import { PALETTE, isCode, codeCompare } from './palette.js';
+import { PALETTE, isCode, codeCompare, setPalette, paletteEntries, DEFAULT_ENTRIES, DEFAULT_HEX, CODE_RE } from './palette.js';
 
 export const DEFAULT_MODELS = {
   anthropic: 'claude-sonnet-5',
@@ -233,6 +233,115 @@ export async function saveSession(s) { await db.put('kv', { key: 'session', valu
 export async function loadSession() { return (await db.get('kv', 'session'))?.value || null; }
 export async function clearSession() { await db.del('kv', 'session'); }
 
+// ---------- 色卡（可自定义） ----------
+
+/** 启动时载入自定义色卡（没有就用内置的） */
+export async function loadPalette() {
+  try {
+    const rec = await db.get('kv', 'palette');
+    setPalette(rec?.value?.entries?.length ? rec.value.entries : DEFAULT_ENTRIES);
+  } catch { setPalette(DEFAULT_ENTRIES); }
+}
+
+async function persistPalette() {
+  await db.put('kv', { key: 'palette', value: { entries: paletteEntries(), updatedAt: Date.now() } });
+}
+
+/** 和内置色卡相比：新增 / 改了颜色 / 删掉 的色号 */
+export function paletteDiff() {
+  const added = [], changed = [], removed = [];
+  for (const [code, p] of PALETTE) {
+    if (!DEFAULT_HEX.has(code)) added.push(code);
+    else if (DEFAULT_HEX.get(code) !== p.hex) changed.push(code);
+  }
+  for (const code of DEFAULT_HEX.keys()) if (!PALETTE.has(code)) removed.push(code);
+  return { added, changed, removed, custom: added.length + changed.length + removed.length > 0 };
+}
+
+/**
+ * 新增或修改一个颜色。改色号时，库存记录会跟着搬到新色号。
+ * { oldCode?, code, hex, name? }
+ */
+export async function upsertColor({ oldCode = null, code, hex, name = '' }) {
+  code = String(code || '').trim().toUpperCase();
+  hex = String(hex || '').trim().toUpperCase();
+  if (!hex.startsWith('#')) hex = '#' + hex;
+  if (!CODE_RE.test(code)) throw new Error('色号格式不对：应为 1–3 个字母 + 1–3 位数字，如 H7、P23、ZG1');
+  if (!/^#[0-9A-F]{6}$/.test(hex)) throw new Error('颜色格式不对：应为 #RRGGBB，如 #FF8800');
+  if (code !== oldCode && PALETTE.has(code)) throw new Error(`色号 ${code} 已经存在`);
+  const entries = paletteEntries().filter(e => e.code !== oldCode && e.code !== code);
+  entries.push({ code, hex, ...(name ? { name } : {}) });
+  if (oldCode && oldCode !== code) {
+    const rec = await db.get('colors', oldCode);
+    if (rec) {
+      const exist = await db.get('colors', code);
+      await db.put('colors', { ...rec, code, stock: (rec.stock || 0) + (exist?.stock || 0), updatedAt: Date.now() });
+      await db.del('colors', oldCode);
+      await db.put('transactions', {
+        time: Date.now(), type: 'adjust', note: `色号改名 ${oldCode} → ${code}`,
+        deltas: [{ code: oldCode, delta: -(rec.stock || 0), before: rec.stock || 0, after: 0 }, { code, delta: rec.stock || 0, before: exist?.stock || 0, after: (rec.stock || 0) + (exist?.stock || 0) }],
+      });
+    }
+  }
+  setPalette(entries);
+  await persistPalette();
+  return code;
+}
+
+/** 删除颜色；库存里有这个色号的记录会一起删除（记一条流水） */
+export async function deleteColor(code) {
+  const rec = await db.get('colors', code);
+  if (rec) {
+    await db.del('colors', code);
+    if (rec.stock) {
+      await db.put('transactions', {
+        time: Date.now(), type: 'adjust', note: `删除色号 ${code}`,
+        deltas: [{ code, delta: -rec.stock, before: rec.stock, after: 0 }],
+      });
+    }
+  }
+  setPalette(paletteEntries().filter(e => e.code !== code));
+  await persistPalette();
+}
+
+/**
+ * 批量新增/修改：lines 形如 “ZG1 #DAABB3 名称”。
+ * 返回 { added, updated, errors }
+ */
+export async function importPaletteText(text) {
+  const map = new Map(paletteEntries().map(e => [e.code, e]));
+  let added = 0, updated = 0;
+  const errors = [];
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('//') || line.startsWith('#!')) continue;
+    const m = line.match(/^([A-Za-z]{1,3}\d{1,3})[\s,，:：=]+#?([0-9A-Fa-f]{6})\b\s*(.*)$/);
+    if (!m) { errors.push(line); continue; }
+    const code = m[1].toUpperCase(), hex = '#' + m[2].toUpperCase(), name = m[3].trim();
+    if (map.has(code)) { if (map.get(code).hex !== hex || (name && map.get(code).name !== name)) updated++; }
+    else added++;
+    map.set(code, { code, hex, ...(name ? { name } : map.get(code)?.name ? { name: map.get(code).name } : {}) });
+  }
+  if (added || updated) {
+    setPalette([...map.values()]);
+    await persistPalette();
+  }
+  return { added, updated, errors };
+}
+
+export function paletteText() {
+  return paletteEntries().map(e => `${e.code} ${e.hex}${e.name ? ' ' + e.name : ''}`).join('\n');
+}
+
+/** 恢复内置色卡。自定义新增的色号若有库存，不会删除库存记录（只是色卡里看不到） */
+export async function resetPalette() {
+  await db.del('kv', 'palette');
+  setPalette(DEFAULT_ENTRIES);
+}
+
+/** 某个色号当前的库存（用于删除/改名前提示） */
+export async function stockRecord(code) { return db.get('colors', code); }
+
 // ---------- 备份 ----------
 
 export async function exportData({ includeSecrets = false } = {}) {
@@ -244,6 +353,7 @@ export async function exportData({ includeSecrets = false } = {}) {
   return {
     app: 'pindou-counter', version: 1, exportedAt: new Date().toISOString(),
     colors: await db.getAll('colors'),
+    palette: paletteDiff().custom ? paletteEntries() : null,
     patterns: await db.getAll('patterns'),
     transactions: await db.getAll('transactions'),
     settings,
@@ -254,6 +364,10 @@ export async function importData(data) {
   if (!data || data.app !== 'pindou-counter') throw new Error('这不是拼豆计数器的备份文件');
   const current = await getSettings();
   await db.clearAll();
+  if (Array.isArray(data.palette) && data.palette.length) {
+    setPalette(data.palette);
+    await persistPalette();
+  } else setPalette(DEFAULT_ENTRIES);
   for (const c of data.colors || []) await db.put('colors', c);
   for (const p of data.patterns || []) await db.put('patterns', p);
   for (const t of data.transactions || []) await db.put('transactions', t);
@@ -268,4 +382,5 @@ export async function importData(data) {
 export async function resetAll() {
   await db.clearAll();
   settingsCache = null;
+  setPalette(DEFAULT_ENTRIES);
 }
