@@ -4,6 +4,7 @@ let seq = 0;
 const pending = new Map();
 
 async function local(op, img, args) {
+  if (op === 'clean') return (await import('./cells.js')).dewatermarkImage(img, args.xs, args.ys, args.cells);
   const m = await import('./board.js');
   return op === 'digitize' ? m.digitize(img, args) : m.classifyGrid(img, args.xs, args.ys, args.refs, args.opt);
 }
@@ -27,7 +28,7 @@ function getWorker() {
   return w || null;
 }
 
-/** op: 'digitize'（args = { region, refs, locks }）或 'classify'（args = { xs, ys, refs, opt }） */
+/** op: 'digitize'（args = { region, refs, locks, dewatermark }）、'classify'（args = { xs, ys, refs, opt }）或 'clean'（去水印后的图，args = { xs, ys, cells }） */
 export function runBoard(op, img, args) {
   const wk = getWorker();
   const plain = { data: img.data, width: img.width, height: img.height };

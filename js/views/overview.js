@@ -132,7 +132,7 @@ export function renderOverview(app, { discard }) {
     it.verified ? h('span.dot.v', '✓') : h('span.dot.' + toneOf(it, s))))));
   const noPos = s.items.filter(it => !(it.img != null && it.box)).length;
   if (noPos) view.append(h('p.small.muted', `其中 ${noPos} 项没有位置（手动添加或位置没识别出来），不在图上画框。`));
-  view.append(h('div.center', h('button.link', { onclick: () => addByPick(app) }, '＋ 手动添加一个颜色')));
+  view.append(h('div.center', h('button.link', { onclick: () => addByPick(app) }, '＋ 补一个漏掉的颜色（图上点不到时用）')));
 
   // ---- 和拼豆板交叉核对：把网格数字化，看每种颜色图上有几格（不按清单凑数） ----
   const ck = h('div.card.ov-check', h('div.row.gap', h('div.spinner.sm'), h('span.small.muted', '正在把图纸数字化，和清单交叉核对…')));
@@ -295,14 +295,34 @@ function snippet(imgEl, im, box, others) {
 
 /** 不在图上点，直接从色卡里选一个加进来 */
 async function addByPick(app) {
+  // 补完留在总览：先把颜色补齐，再统一逐项核对数量
+  if (await addColorSheet(app)) app.rerender();
+}
+
+/**
+ * 补一个漏掉的颜色：选色号 → 填数量（可以先不填，逐项核对时再填）→ 加进列表。
+ * 不跳去逐项核对，调用方自己决定留在哪一页。返回是否加了。
+ */
+export async function addColorSheet(app) {
   const s = app.rec.session;
-  const code = await pickCode({ title: '添加颜色' });
-  if (!code) return;
-  const existing = s.items.findIndex(i => i.code === code);
-  if (existing >= 0) { toast(`${code} 已在列表里，已为你打开它`); return openCard(app, existing); }
-  s.items.push({ id: newId(), img: null, code, rawCode: '', count: null, box: null, rgb: null, uncertain: false, verified: false, orig: null, added: true });
-  openCard(app, s.items.length - 1);
-  setTimeout(() => app.view.querySelector('.stepper input')?.focus(), 50);
+  const code = await pickCode({ title: '补一个漏掉的颜色' });
+  if (!code) return false;
+  if (s.items.some(i => i.code === code)) { toast(`${code} 已经在列表里了`, 'error'); return false; }
+  let count = null;
+  const ok = await new Promise(resolve => {
+    const addBtn = h('button.btn.primary', { onclick: () => sh.close(true) }, '添加');
+    const cnt = stepper(null, v => { count = v; });
+    const sh = sheet([
+      h('div.row.gap', chip(code, { size: 'lg' }), h('div.small.muted', '数量照图上写的填；现在不填也行，逐项核对时再填。')),
+      h('div.edit-grid', { style: { marginTop: '12px' } }, h('span.lbl', '数量'), cnt),
+      h('div.row.gap.end', { style: { marginTop: '14px' } }, h('button.btn.ghost', { onclick: () => sh.close(false) }, '取消'), addBtn),
+    ], { title: `补上 ${code}`, onClose: v => resolve(!!v) });
+  });
+  if (!ok) return false;
+  s.items.push({ id: newId(), img: null, code, rawCode: '', count: count > 0 ? count : null, box: null, rgb: null, uncertain: false, verified: false, orig: null, added: true });
+  app.saveSession();
+  toast(`已添加 ${code}${count > 0 ? ` × ${count}` : ''}，数量在逐项核对时确认`, 'ok');
+  return true;
 }
 
 
@@ -323,7 +343,8 @@ async function crossCheck(app, s, card) {
       const im = s.images.find(x => x.fullId);
       const legend = im.fullMap ? { x: im.fullMap.ox, y: im.fullMap.oy, w: im.dw * im.fullMap.k, h: im.dh * im.fullMap.k } : null;
       const { canvas, data } = await loadPixels({ fullId: im.fullId });
-      const res = await runBoard('digitize', data, { region: gridRegion({ legend }, canvas), refs });
+      const dewatermark = app.settings.dewatermark !== false;
+      const res = await runBoard('digitize', data, { region: gridRegion({ legend }, canvas), refs, dewatermark });
       if (res.error) { out = { sig, error: res.error }; }
       else {
         const free = res.stats.freeCounts || {};
@@ -341,7 +362,7 @@ async function crossCheck(app, s, card) {
           beads: res.stats.beads,
         };
         // 顺手把拼豆板存进会话：保存图纸时清单没变就直接用，开始拼豆不用再算一遍
-        s.boardPre = { sig, board: boardRecord(res, im.fullId, { auto: true }) };
+        s.boardPre = { sig, board: boardRecord(res, im.fullId, { auto: true, dewatermark }) };
       }
     } catch (e) { out = { sig, error: e.message || String(e) }; }
     s.boardCheck = out;

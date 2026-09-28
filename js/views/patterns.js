@@ -114,14 +114,18 @@ async function renderList(app) {
   const counts = { all: list.length };
   for (const p of list) counts[p.status] = (counts[p.status] || 0) + 1;
   const tags = await store.allTags();
+  // 点筛选会整页重画：记住这一排按钮滚到的位置，重画后放回去
+  const keepScroll = fn => () => { ui.filtersScroll = filters.scrollLeft; fn(); app.rerender(); };
   const filters = h('div.filters',
     [['all', '全部'], ['pending', '待拼'], ['building', '拼豆中'], ['done', '已拼']].filter(([k]) => k === 'all' || counts[k])
-      .map(([k, label]) => h('button' + (ui.status === k ? '.on' : ''), { onclick: () => { ui.status = k; app.rerender(); } }, `${label} ${counts[k] || 0}`)),
+      .map(([k, label]) => h('button' + (ui.status === k ? '.on' : ''), { onclick: keepScroll(() => { ui.status = k; }) }, `${label} ${counts[k] || 0}`)),
     tags.length ? h('span.fsep') : null,
     tags.map(({ tag, count }) => h('button.tagf' + (ui.tags.has(tag) ? '.on' : ''), {
-      onclick: () => { if (ui.tags.has(tag)) ui.tags.delete(tag); else ui.tags.add(tag); app.rerender(); },
+      onclick: keepScroll(() => { if (ui.tags.has(tag)) ui.tags.delete(tag); else ui.tags.add(tag); }),
     }, `#${tag}`, h('span.n', count))));
   view.append(h('div.pat-tools', search, filters));
+  filters.scrollLeft = ui.filtersScroll || 0;
+  requestAnimationFrame(() => { filters.scrollLeft = ui.filtersScroll || 0; });
   if (sel) view.append(h('p.small.muted', { style: { margin: '2px 2px 6px' } }, '勾选打算拼的图纸，看一共要多少豆子、哪些颜色要先买。'));
   view.append(results);
 
@@ -215,6 +219,13 @@ async function renderDetail(app) {
     view.append(h('div.banner.ok', h('span.ico', '✅'), h('div',
       h('b', p.build?.partial ? '已结束（拼了一部分）' : '已拼完'),
       h('div.small', `库存已扣减${p.doneAt ? ' · ' + fmtTime(p.doneAt) : ''}`))));
+  }
+  const lastH = p.status === 'pending' ? (p.history || []).slice(-1)[0] : null;
+  if (lastH) {
+    const ded = Object.entries(lastH.deducted || {}).filter(([, n]) => n > 0);
+    view.append(h('div.banner.info', h('span.ico', '↩️'), h('div',
+      h('b', '上次拼到一半没继续'),
+      h('div.small', `${fmtTime(lastH.endedAt)} 结束${ded.length ? `，当时已从库存扣掉：${ded.map(([c, n]) => `${c}×${n}`).join('、')}` : '，没有扣库存'}。这张图纸已放回“待拼”，再拼是全新的一次。`))));
   }
   view.append(h('div.pd-cta',
     p.status === 'done'
@@ -377,7 +388,7 @@ async function directFinish(app, p) {
 export async function finishAndShow(app, p, amounts, opts) {
   try {
     const txId = await store.settleBuild(p.id, amounts, opts);
-    app.pat.result = { txId, patternId: p.id, codes: Object.keys(amounts).filter(c => amounts[c] > 0), name: p.name, finished: !!opts.finish, partial: !!opts.partial };
+    app.pat.result = { txId, patternId: p.id, codes: Object.keys(amounts).filter(c => amounts[c] > 0), name: p.name, finished: !!opts.finish, partial: !!opts.partial, abandon: !!opts.abandon };
     return goPattern(app, p.id, 'done');
   } catch (e) { toast(e.message, 'error'); }
 }
@@ -426,7 +437,7 @@ async function renderDone(app) {
 
   view.append(h('div.banner.ok', h('span.ico', res.finished && !res.partial ? '🎉' : '✅'), h('div',
     h('b', res.finished && !res.partial ? `“${res.name}”拼完了，库存已扣减` : `“${res.name}”已扣减库存`),
-    h('div.small', tx ? `${tx.deltas.length} 种颜色，共 ${fmtNum(total)} 颗。` : '没有需要扣的颜色。'))));
+    h('div.small', (tx ? `${tx.deltas.length} 种颜色，共 ${fmtNum(total)} 颗。` : '没有需要扣的颜色。') + (res.abandon ? '图纸已放回“待拼”，以后再拼是全新的一次。' : '')))));
   if (need.length) {
     view.append(h('div.card',
       h('h2', `🛒 这些颜色该补货了（${need.length}）`),

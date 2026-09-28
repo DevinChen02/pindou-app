@@ -1,10 +1,10 @@
 // “库存”标签：每个色号还剩多少、待补货、补货/盘点、批量录入。
 import { h, clear, toast, sheet, chip, fmtNum, fmtTime, confirmDialog } from '../ui.js';
-import { PALETTE, SERIES, hexOf, normalizeCode, seriesLabel } from '../palette.js';
+import { PALETTE, SERIES, BASE_SERIES, hexOf, normalizeCode, seriesLabel } from '../palette.js';
 import { parseLegendText } from '../extract/text.js';
 import * as store from '../store.js';
 
-const ui = { filter: 'owned', series: 'all', q: '', tab: 'stock' };
+const ui = { filter: 'owned', series: 'all', q: '', tab: 'stock', filtersScroll: 0 };
 
 export async function renderInventory(app) {
   app.setTitle('库存');
@@ -28,11 +28,15 @@ export async function renderInventory(app) {
 
   const search = h('input.input', { type: 'search', placeholder: '搜索色号，如 H7', value: ui.q, autocapitalize: 'characters', autocomplete: 'off' });
   const grid = h('div.inv-grid');
+  const byStock = settings.invSort === 'stock';
+  const list = [...PALETTE.values()];
+  // 按数量从多到少（没录入的排最后）；数量一样按色号
+  if (byStock) list.sort((a, b) => (inv.get(b.code)?.stock ?? -1) - (inv.get(a.code)?.stock ?? -1));
   const draw = () => {
     clear(grid);
     const q = ui.q.trim().toUpperCase();
     let n = 0;
-    for (const p of PALETTE.values()) {
+    for (const p of list) {
       const rec = inv.get(p.code);
       const stock = rec?.stock ?? 0;
       if (ui.series !== 'all' && p.series !== ui.series) continue;
@@ -53,13 +57,25 @@ export async function renderInventory(app) {
   };
   search.addEventListener('input', () => { ui.q = search.value; draw(); });
 
+  // 点筛选按钮会整页重画：记住这一排按钮滚到哪了，重画后放回原处（不自动滑回最左边）
+  const pick = fn => () => { ui.filtersScroll = filters.scrollLeft; fn(); app.rerender(); };
   const filters = h('div.filters',
     [['owned', `有库存 ${ownedN}`], ['low', `待补货 ${lows.length}`], ['all', `全部 ${PALETTE.size}`]].map(([k, label]) =>
-      h('button' + (ui.filter === k ? '.on' : ''), { onclick: () => { ui.filter = k; app.rerender(); } }, label)),
+      h('button' + (ui.filter === k ? '.on' : ''), { onclick: pick(() => { ui.filter = k; }) }, label)),
     h('span', { style: { width: '8px', flexShrink: 0 } }),
-    ['all', ...SERIES].map(sr => h('button' + (ui.series === sr ? '.on' : ''), { onclick: () => { ui.series = sr; app.rerender(); } }, sr === 'all' ? '全系列' : seriesLabel(sr))));
+    ['all', ...SERIES].map(sr => h('button' + (ui.series === sr ? '.on' : ''), { onclick: pick(() => { ui.series = sr; }) }, sr === 'all' ? '全系列' : seriesLabel(sr))));
+  const sortBtn = h('button.btn.sm.soft.inv-sort', {
+    'aria-label': '排序',
+    onclick: async () => {
+      settings.invSort = byStock ? 'code' : 'stock';
+      await store.saveSettings(settings);
+      app.rerender();
+    },
+  }, byStock ? '↓ 数量' : '按色号');
 
-  view.append(segs, h('div.inv-tools', search, filters));
+  view.append(segs, h('div.inv-tools', h('div.row.gap-s', search, sortBtn), filters));
+  filters.scrollLeft = ui.filtersScroll;
+  requestAnimationFrame(() => { filters.scrollLeft = ui.filtersScroll; });
   if (lows.length && ui.filter !== 'low') {
     view.append(h('div.banner.warn', { style: { cursor: 'pointer' }, onclick: () => { ui.filter = 'low'; app.rerender(); } },
       h('span.ico', '🛒'), h('div.grow', h('b', `${lows.length} 种颜色低于补货线`), h('div.small', lows.slice(0, 8).map(x => x.code).join('、') + (lows.length > 8 ? '…' : ''))), h('span', '›')));
@@ -114,20 +130,91 @@ async function editSheet(app, code) {
 
 function batchSheet(app) {
   let mode = 'add';
-  const ta = h('textarea.input', { placeholder: '每行一个：色号 数量\n例如：\nH7 1000\nH2 1000\nA11 500' });
-  const out = h('div');
+  const picked = new Set();
+  let series = SERIES[0];
+  const modeLabel = () => (mode === 'add' ? '补货' : '盘点设为');
   const seg = h('div.seg');
   const renderSeg = () => {
     clear(seg);
-    for (const [k, label] of [['add', '补货（加上）'], ['set', '盘点（设为）']]) seg.append(h('button' + (mode === k ? '.on' : ''), { onclick: () => { mode = k; renderSeg(); } }, label));
+    for (const [k, label] of [['add', '补货（加上）'], ['set', '盘点（设为）']]) seg.append(h('button' + (mode === k ? '.on' : ''), { onclick: () => { mode = k; renderSeg(); refresh(); } }, label));
   };
-  renderSeg();
-  const seriesSel = h('select.input', [`全部 ${PALETTE.size} 色`, ...SERIES.map(s => `${seriesLabel(s)} 系列`)].map((l, i) => h('option', { value: i ? SERIES[i - 1] : 'all' }, l)));
-  const seriesVal = h('input.input', { type: 'number', inputmode: 'numeric', placeholder: '颗数', style: { width: '100px' } });
+
+  // ---- 点选颜色（可多选）----
+  const tabs = h('div.series-tabs');
+  const grid = h('div.code-grid.batch-grid');
+  const pickInfo = h('div.small');
+  const pickVal = h('input.input.num.pick-n', { type: 'number', inputmode: 'numeric', pattern: '[0-9]*', placeholder: '颗数', min: 0 });
+  const pickBtn = h('button.btn.primary.pick-go');
+  const renderTabs = () => {
+    const sl = tabs.scrollLeft;
+    clear(tabs);
+    for (const sr of SERIES) {
+      const n = [...PALETTE.values()].filter(p => p.series === sr && picked.has(p.code)).length;
+      tabs.append(h('button.tab' + (sr === series ? '.on' : ''), { title: seriesLabel(sr), onclick: () => { series = sr; renderTabs(); renderGrid(); } }, sr, n ? h('sup.tab-n', n) : null));
+    }
+    tabs.scrollLeft = sl;
+  };
+  const renderGrid = () => {
+    clear(grid);
+    for (const p of PALETTE.values()) {
+      if (p.series !== series) continue;
+      grid.append(h('button.code-cell' + (picked.has(p.code) ? '.on' : ''), {
+        'data-code': p.code,
+        onclick: e => { if (picked.has(p.code)) picked.delete(p.code); else picked.add(p.code); e.currentTarget.classList.toggle('on'); renderTabs(); refresh(); },
+      }, chip(p.code, { size: 'sm' })));
+    }
+  };
+  const refresh = () => {
+    pickInfo.textContent = picked.size ? `已选 ${picked.size} 色：${[...picked].slice(0, 10).join('、')}${picked.size > 10 ? '…' : ''}` : '点下面的颜色选中（可以多选，换系列也保留）';
+    pickBtn.textContent = picked.size ? `${modeLabel()} ${picked.size} 色` : modeLabel();
+  };
+  pickBtn.addEventListener('click', async () => {
+    if (!picked.size) return toast('先点选颜色');
+    const v = Math.round(+pickVal.value);
+    if (pickVal.value === '' || v < 0 || (mode === 'add' && v === 0)) return toast('请输入颗数');
+    const codes = [...picked];
+    if (!(await confirmDialog(`${mode === 'add' ? `给 ${codes.length} 种颜色各加 ${v} 颗` : `把 ${codes.length} 种颜色都设为 ${v} 颗`}？`, { detail: codes.join('、') }))) return;
+    await store.applyChanges(codes.map(code => (mode === 'add' ? { code, delta: v } : { code, set: v })), { type: mode === 'add' ? 'restock' : 'import', note: `点选 ${codes.length} 色` });
+    toast('已录入', 'ok'); sh.close(); app.rerender();
+  });
+
+  // ---- 按范围一次设好 ----
+  const baseCodes = [...PALETTE.values()].filter(p => BASE_SERIES.includes(p.series));
+  const ranges = [
+    ['all', `全部 ${PALETTE.size} 色`, () => [...PALETTE.values()]],
+    ...(baseCodes.length && baseCodes.length < PALETTE.size ? [['base', `基础 ${baseCodes.length} 色（A–M）`, () => baseCodes]] : []),
+    ...SERIES.map(sr => [sr, `${seriesLabel(sr)} 系列`, () => [...PALETTE.values()].filter(p => p.series === sr)]),
+  ];
+  const seriesSel = h('select.input.range-sel', ranges.map(([k, l]) => h('option', { value: k }, l)));
+  const seriesVal = h('input.input.num.range-n', { type: 'number', inputmode: 'numeric', placeholder: '颗数', style: { width: '100px' } });
+  const rangeBtn = h('button.btn.range-go', {
+    onclick: async () => {
+      const v = Math.round(+seriesVal.value);
+      if (seriesVal.value === '' || v < 0 || (mode === 'add' && v === 0)) return toast('请输入颗数');
+      const [, label, get] = ranges.find(r => r[0] === seriesSel.value);
+      const codes = get().map(p => p.code);
+      if (!(await confirmDialog(mode === 'add' ? `给${label}每色加 ${v} 颗？` : `把${label}都设为 ${v} 颗？`, { detail: '适合刚买了整套色卡时使用。之后可以单独修改。' }))) return;
+      await store.applyChanges(codes.map(code => (mode === 'add' ? { code, delta: v } : { code, set: v })), { type: mode === 'add' ? 'restock' : 'import', note: `${label}${mode === 'add' ? '各加' : '设为'} ${v}` });
+      toast('已录入', 'ok'); sh.close(); app.rerender();
+    },
+  }, '录入');
+
+  // ---- 粘贴列表 ----
+  const ta = h('textarea.input', { placeholder: '每行一个：色号 数量\n例如：\nH7 1000\nH2 1000\nA11 500' });
+  const out = h('div');
   const sh = sheet([
-    h('p.small.muted', '适合第一次录入或一次买了很多颜色。支持直接粘贴“色号 数量”列表。'),
-    seg, h('div.spacer'), ta,
-    h('button.btn.primary.block', {
+    h('p.small.muted', '适合第一次录入或一次买了很多颜色。先选“补货”还是“盘点”，再用下面任意一种方式录入。'),
+    seg,
+    h('div.section-title', '点选颜色'),
+    pickInfo, tabs, grid,
+    h('div.row.gap.batch-act', pickVal, pickBtn,
+      h('button.btn.ghost.sm', { onclick: () => { picked.clear(); renderTabs(); renderGrid(); refresh(); } }, '清空'),
+      h('button.btn.ghost.sm', { onclick: () => { for (const p of PALETTE.values()) if (p.series === series) picked.add(p.code); renderTabs(); renderGrid(); refresh(); } }, '全选本系列')),
+    h('div.section-title', '按系列 / 整套一次录入'),
+    h('div.row.gap', seriesSel, seriesVal, rangeBtn),
+    h('div.section-title', '粘贴“色号 数量”列表'),
+    ta,
+    h('button.btn.block', {
       style: { marginTop: '10px' },
       onclick: async () => {
         const res = parseLegendText(ta.value);
@@ -141,20 +228,10 @@ function batchSheet(app) {
         await store.applyChanges(items.map(i => mode === 'add' ? { code: i.code, delta: i.count } : { code: i.code, set: i.count }), { type: mode === 'add' ? 'restock' : 'import', note: '批量' });
         toast('已录入', 'ok'); sh.close(); app.rerender();
       },
-    }, '录入'),
+    }, '录入列表'),
     out,
-    h('div.section-title', '按系列一次设好（盘点）'),
-    h('div.row.gap', seriesSel, seriesVal, h('button.btn', {
-      onclick: async () => {
-        const v = Math.round(+seriesVal.value);
-        if (seriesVal.value === '' || v < 0) return toast('请输入颗数');
-        const codes = [...PALETTE.values()].filter(p => seriesSel.value === 'all' || p.series === seriesSel.value).map(p => p.code);
-        if (!(await confirmDialog(`把 ${codes.length} 个色号都设为 ${v} 颗？`, { detail: '适合刚买了整套色卡时使用。之后可以单独修改。' }))) return;
-        await store.applyChanges(codes.map(code => ({ code, set: v })), { type: 'import', note: `${seriesSel.selectedOptions[0].textContent}设为 ${v}` });
-        toast('已设置', 'ok'); sh.close(); app.rerender();
-      },
-    }, '设置')),
   ], { title: '批量录入库存', tall: true });
+  renderSeg(); renderTabs(); renderGrid(); refresh();
 }
 
 // ---------- 库存流水 ----------

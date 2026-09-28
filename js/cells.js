@@ -513,6 +513,23 @@ export function classifyFeatures(F, refs, opt = {}) {
     textUsed = true;
   }
 
+  // ---- 去水印模式：同一色号的格子本来长得一模一样（同一个颜色、同一个字），
+  // 取每类格子逐像素的中位数当“样板格”，每格和样板逐像素比、误差封顶——
+  // 被水印盖住的像素和哪类都对不上，只算封顶的那一点，决定归类的是没被盖住的像素 ----
+  let dewatermarked = false;
+  if (opt.dewatermark && F.patch) {
+    for (let it = 0; it < 2; it++) {
+      const ex = exemplars(F, sol.assign, K1);
+      const excost = exemplarCost(F, ex, K1);
+      const base = Float32Array.from(cost);
+      for (let j = 0; j < N * K1; j++) cost[j] = 0.5 * base[j] + 0.5 * excost[j];
+      applyLocks();
+      sol = solveCounts(cost, N, K1, target, total > 0 ? rho / 2 : 0, sol.assign, outlier);
+      if (it === 0) for (let j = 0; j < N * K1; j++) cost[j] = base[j];
+    }
+    dewatermarked = true;
+  }
+
   // ---- 输出 ----
   const assign = sol.assign, pot = sol.pot;
   if (opt.debug) Object.assign(opt.debug, { cost, colorCost, pot, refLab, emptyLab });
@@ -557,7 +574,7 @@ export function classifyFeatures(F, refs, opt = {}) {
     cost, // 每格每类的总代价（N×(K+1)），列候选用
     stats: {
       printed, exact: codes.length - diff.length, total: codes.length, diff,
-      beads: cntArr.reduce((a, b, k) => a + (k ? b : 0), 0), want: total, freeCounts, calibrated, textUsed, outliers: nOut,
+      beads: cntArr.reduce((a, b, k) => a + (k ? b : 0), 0), want: total, freeCounts, calibrated, textUsed, outliers: nOut, dewatermarked,
     },
     suspects,
   };
@@ -643,9 +660,182 @@ function findSuspects(F, labs, refLab, emptyLab, printed, assign) {
   return out.sort((a, b) => b.n - a.n);
 }
 
-/** 从网格线直接归类（自动找到的网格、手动校准的网格都走这里） */
-export function classifyGrid(img, xs, ys, refs, opt) {
+// ---------- 去水印：样板格 ----------
+export const PS = 16; // 样板格边长（像素）
+/** 每格按自己的格线重采样成 PS×PS 的 RGB 小图（四边各去掉 6%，避开格线） */
+export function cellPatches(img, xs, ys, S = PS) {
+  const { data, width, height } = img;
+  const cols = xs.length - 1, rows = ys.length - 1, N = rows * cols, P = S * S;
+  const patch = new Uint8Array(N * P * 3);
+  for (let i = 0; i < N; i++) {
+    const r = Math.floor(i / cols), c = i % cols;
+    const x0 = xs[c], x1 = xs[c + 1], y0 = ys[r], y1 = ys[r + 1];
+    const w = x1 - x0, h = y1 - y0, mx = w * 0.06, my = h * 0.06;
+    for (let v = 0; v < S; v++) {
+      const y = Math.min(height - 1, Math.floor(y0 + my + (v + 0.5) * (h - 2 * my) / S));
+      for (let u = 0; u < S; u++) {
+        const x = Math.min(width - 1, Math.floor(x0 + mx + (u + 0.5) * (w - 2 * mx) / S));
+        const p = (y * width + x) * 4, o = (i * P + v * S + u) * 3;
+        patch[o] = data[p]; patch[o + 1] = data[p + 1]; patch[o + 2] = data[p + 2];
+      }
+    }
+  }
+  return patch;
+}
+/** 每类的样板格：归到这类的格子逐像素取中位数（每类最多取 150 格） */
+function exemplars(F, assign, K1, S = PS) {
+  const P = S * S, ex = new Float32Array(K1 * P * 3).fill(-1);
+  const vals = new Float32Array(150);
+  for (let k = 0; k < K1; k++) {
+    const mem = [];
+    for (let i = 0; i < F.N; i++) if (assign[i] === k) mem.push(i);
+    if (!mem.length) continue;
+    const step = Math.ceil(mem.length / 150), sub = mem.filter((_, j) => j % step === 0);
+    const n = sub.length, v = vals.subarray(0, n);
+    for (let q = 0; q < P * 3; q++) {
+      for (let j = 0; j < n; j++) v[j] = F.patch[sub[j] * P * 3 + q];
+      v.sort();
+      ex[k * P * 3 + q] = v[n >> 1];
+    }
+  }
+  return ex;
+}
+/** 每格和每个样板的逐像素色差（封顶 40，被水印盖住的像素最多算 40） */
+function exemplarCost(F, ex, K1, S = PS, TAU = 40) {
+  const P = S * S, out = new Float32Array(F.N * K1);
+  for (let i = 0; i < F.N; i++) {
+    const o = i * P * 3;
+    for (let k = 0; k < K1; k++) {
+      const e = k * P * 3;
+      if (ex[e] < 0) { out[i * K1 + k] = TAU; continue; }
+      let s = 0;
+      for (let q = 0; q < P * 3; q += 3) {
+        const a = F.patch[o + q] - ex[e + q], b = F.patch[o + q + 1] - ex[e + q + 1], c = F.patch[o + q + 2] - ex[e + q + 2];
+        const d = Math.sqrt(a * a + b * b + c * c);
+        s += d < TAU ? d : TAU;
+      }
+      out[i * K1 + k] = s / P;
+    }
+  }
+  return out;
+}
+
+/**
+ * 去掉水印后的图（给人看的）：每格和它这一类的样板格（按格子实际大小取）逐像素比，
+ * 差得多的像素（水印、遮挡）换成样板上的像素；字和格线原样保留。返回新的 { data, width, height }
+ */
+export function dewatermarkImage(img, xs, ys, cells) {
+  const { width, height } = img;
+  const src = img.data;
+  const data = new Uint8ClampedArray(src);
+  const cols = xs.length - 1, rows = ys.length - 1, N = rows * cols;
+  const pitch = Math.round((xs[cols] - xs[0]) / cols);
+  // 样板格比格子大一圈（每边多 B 像素），平移对齐时不会出界
+  const S = Math.max(8, Math.min(48, pitch)), B = 3, T = S + 2 * B;
+  let K1 = 1; for (let i = 0; i < cells.length; i++) if (cells[i] >= K1) K1 = cells[i] + 1;
+  // 每格按左上角取 T×T（整像素，不缩放：字的笔画不糊）
+  const at = (x, y) => (Math.min(height - 1, Math.max(0, y)) * width + Math.min(width - 1, Math.max(0, x))) * 4;
+  const cellPatch = (i, du = 0, dv = 0) => {
+    const r = Math.floor(i / cols), c = i % cols, out = new Float32Array(T * T * 3);
+    const bx = Math.round((xs[c] + xs[c + 1] - S) / 2) - B + du, by = Math.round((ys[r] + ys[r + 1] - S) / 2) - B + dv;
+    for (let v = 0; v < T; v++) for (let u = 0; u < T; u++) { const p = at(bx + u, by + v), o = (v * T + u) * 3; out[o] = src[p]; out[o + 1] = src[p + 1]; out[o + 2] = src[p + 2]; }
+    return out;
+  };
+  const median = (arrs) => {
+    const n = arrs.length, out = new Float32Array(T * T * 3), v = new Float32Array(n);
+    for (let q = 0; q < out.length; q++) { for (let j = 0; j < n; j++) v[j] = arrs[j][q]; v.sort(); out[q] = v[n >> 1]; }
+    return out;
+  };
+  const dist = (a, b, du, dv) => { // 只比内部 S×S（去掉格线附近）
+    let s = 0;
+    for (let v = B + 1; v < B + S - 1; v++) for (let u = B + 1; u < B + S - 1; u++) {
+      const o = (v * T + u) * 3, o2 = ((v + dv) * T + u + du) * 3;
+      const x = a[o] - b[o2], y = a[o + 1] - b[o2 + 1], z = a[o + 2] - b[o2 + 2];
+      s += Math.min(1600, x * x + y * y + z * z);
+    }
+    return s;
+  };
+  // 每类：先粗样板 → 每格找最好的 ±1 像素平移 → 对齐后再取中位数（字更清楚）
+  const shift = new Int8Array(N * 2), ex = new Array(K1).fill(null), ink = new Array(K1).fill(null);
+  for (let k = 0; k < K1; k++) {
+    const mem = [];
+    for (let i = 0; i < N; i++) if (cells[i] === k) mem.push(i);
+    if (mem.length < 5) continue; // 太少的色号取不出可靠的样板，原样保留
+    const step = Math.ceil(mem.length / 120), sub = mem.filter((_, j) => j % step === 0);
+    // 网格线有一两像素的误差、会随位置慢慢漂，所以每格在 ±3 像素里找最对得上的位置，对齐两轮
+    let E = median(sub.map(i => cellPatch(i)));
+    const bestShift = (E, i) => {
+      const pch = cellPatch(i);
+      let bs = Infinity, bu = 0, bv = 0;
+      for (let dv = -B; dv <= B; dv++) for (let du = -B; du <= B; du++) { const d = dist(E, pch, du, dv); if (d < bs) { bs = d; bu = du; bv = dv; } }
+      return [bu, bv];
+    };
+    for (let pass = 0; pass < 2; pass++) E = median(sub.map(i => { const [du, dv] = bestShift(E, i); return cellPatch(i, du, dv); }));
+    ex[k] = E;
+    // 底色（样板里最多的颜色）和字的颜色（离底色远的那些像素的中位数）
+    const px = [];
+    for (let v = B + 1; v < B + S - 1; v++) for (let u = B + 1; u < B + S - 1; u++) { const o = (v * T + u) * 3; px.push([E[o], E[o + 1], E[o + 2]]); }
+    const med3 = arr => [0, 1, 2].map(c => { const a = arr.map(q => q[c]).sort((x, y) => x - y); return a[a.length >> 1]; });
+    const bg = med3(px), far = px.filter(q => (q[0] - bg[0]) ** 2 + (q[1] - bg[1]) ** 2 + (q[2] - bg[2]) ** 2 > 2500);
+    ink[k] = far.length >= 4 ? { bg, ink: med3(far) } : null;
+    for (const i of mem) { const [du, dv] = bestShift(E, i); shift[i * 2] = du; shift[i * 2 + 1] = dv; }
+  }
+  // 换像素：和对齐后的样板附近 (2R+1)² 都差很多的，才是水印/遮挡（格子小时字的位置有半像素的差，窗口放大一点保护字）
+  const R = 2;
+  const inkLike = (r, g, b, { bg, ink }) => {
+    const dx = ink[0] - bg[0], dy = ink[1] - bg[1], dz = ink[2] - bg[2], L = dx * dx + dy * dy + dz * dz;
+    const px = r - bg[0], py = g - bg[1], pz = b - bg[2];
+    const t = (px * dx + py * dy + pz * dz) / L;
+    if (t < 0.5) return false;
+    const ex = px - t * dx, ey = py - t * dy, ez = pz - t * dz;
+    return ex * ex + ey * ey + ez * ez < 1600;
+  };
+  // 先数每格要换多少像素：同一色号里「一般的格子」都要换很多，说明样板没对齐（格子里字的位置在飘），这个色号整个不动
+  const frac = new Float32Array(N);
+  const replace = (i, apply) => {
+    const E = ex[cells[i]], I = ink[cells[i]];
+    let n = 0, tot = 0;
+    const r = Math.floor(i / cols), c = i % cols;
+    const bx = Math.round((xs[c] + xs[c + 1] - S) / 2) - B + shift[i * 2], by = Math.round((ys[r] + ys[r + 1] - S) / 2) - B + shift[i * 2 + 1];
+    const w = xs[c + 1] - xs[c], hh = ys[r + 1] - ys[r];
+    const mx = Math.max(1, Math.round(w * 0.08)), my = Math.max(1, Math.round(hh * 0.08));
+    for (let y = ys[r] + my; y < ys[r + 1] - my; y++) {
+      const v = y - by; if (v < R || v >= T - R) continue;
+      for (let x = xs[c] + mx; x < xs[c + 1] - mx; x++) {
+        const u = x - bx; if (u < R || u >= T - R) continue;
+        const p = (y * width + x) * 4;
+        let m = Infinity;
+        for (let dv = -R; dv <= R && m > 2025; dv++) for (let du = -R; du <= R; du++) {
+          const o = ((v + dv) * T + u + du) * 3;
+          const a = src[p] - E[o], b = src[p + 1] - E[o + 1], cc = src[p + 2] - E[o + 2];
+          const d = a * a + b * b + cc * cc;
+          if (d < m) m = d;
+        }
+        tot++;
+        // 像字的像素（颜色落在「底色→字色」这条线上、偏字色那头）不换：
+        // 就算这格的色号认错了（样板上的字不一样），格子里原本印的字也不会被抹掉
+        if (m > 2025 && I && inkLike(src[p], src[p + 1], src[p + 2], I)) m = 0;
+        if (m > 2025) { n++; if (apply) { const o = (v * T + u) * 3; data[p] = E[o]; data[p + 1] = E[o + 1]; data[p + 2] = E[o + 2]; } }
+      }
+    }
+    return tot ? n / tot : 0;
+  };
+  for (let i = 0; i < N; i++) if (ex[cells[i]]) frac[i] = replace(i, false);
+  for (let k = 0; k < K1; k++) {
+    if (!ex[k]) continue;
+    const f = []; for (let i = 0; i < N; i++) if (cells[i] === k) f.push(frac[i]);
+    f.sort((a, b) => a - b);
+    const med = f[f.length >> 1];
+    if (med > 0.08) { ex[k] = null; continue; } // 样板本身就对不上（字在格子里飘），这个色号不动
+  }
+  for (let i = 0; i < N; i++) if (ex[cells[i]]) replace(i, true);
+  return { data, width, height };
+}
+
+/** 从网格线直接归类（自动找到的网格、手动校准的网格都走这里）。opt.dewatermark：去水印模式 */
+export function classifyGrid(img, xs, ys, refs, opt = {}) {
   const F = cellFeatures(img, xs, ys);
+  if (opt?.dewatermark) F.patch = cellPatches(img, xs, ys);
   const res = classifyFeatures(F, refs, opt);
   return { rows: F.rows, cols: F.cols, ...res, geom: { xs, ys } };
 }

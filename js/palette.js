@@ -37,6 +37,8 @@ export const DEFAULT_HEX = new Map(DEFAULT_ENTRIES.map(e => [e.code, e.hex]));
 
 const SERIES_ORDER = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'M', 'P', 'R', 'Y', 'Q', 'T'];
 export const SERIES_NAMES = { P: '珠光', R: '果冻', Y: '夜光', Q: '温变', T: '透明闪片' };
+/** 基础色（A–H、M，MARD 基础 221 色），和 280 色里的 A–M 完全重合 */
+export const BASE_SERIES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'M'];
 
 // 当前色卡（运行时可替换；这几个对象本身不换，只改内容，别的模块 import 后一直有效）
 export const PALETTE = new Map();   // code → { code, series, num, hex, rgb, lab, name }

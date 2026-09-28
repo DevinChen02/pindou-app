@@ -334,10 +334,10 @@ export function sampleCells(img, xs, ys) {
 }
 
 /** 手动校准：用户点了网格左上角、右下角，并告诉我们几列几行 */
-export function gridFromCorners(img, { x0, y0, x1, y1, cols, rows, refs, locks = null }) {
+export function gridFromCorners(img, { x0, y0, x1, y1, cols, rows, refs, locks = null, dewatermark = false }) {
   const xs = Array.from({ length: cols + 1 }, (_, i) => Math.round(x0 + (x1 - x0) * i / cols));
   const ys = Array.from({ length: rows + 1 }, (_, i) => Math.round(y0 + (y1 - y0) * i / rows));
-  const res = classifyGrid(img, xs, ys, refs, { locks });
+  const res = classifyGrid(img, xs, ys, refs, { locks, dewatermark });
   return { ...res, rows, cols, geom: { xs, ys, pitch: (x1 - x0) / cols, manual: true } };
 }
 
@@ -347,7 +347,7 @@ export function gridFromCorners(img, { x0, y0, x1, y1, cols, rows, refs, locks =
  * opts.refs:   [{ code, rgb?, count }] 清单里的颜色（rgb 为清单色块的实际取色，没有就用色卡标准色）
  * 返回 { rows, cols, codes, cells(Uint8Array，0=空，i+1=codes[i]), counts, stats, geom }
  */
-export function digitize(img, { region, refs, locks = null }) {
+export function digitize(img, { region, refs, locks = null, dewatermark = false }) {
   const W = img.width, H = img.height, d = img.data;
   const R = region || { x: 0, y: 0, w: W, h: H };
   const rx0 = Math.max(0, Math.round(R.x)), ry0 = Math.max(0, Math.round(R.y));
@@ -452,7 +452,7 @@ export function digitize(img, { region, refs, locks = null }) {
   ({ xs, ys } = extendGrid(img, xs, ys, { rx0, ry0, rx1, ry1 }, headerLike));
   rows = ys.length - 1; cols = xs.length - 1;
 
-  const res = classifyGrid(img, xs, ys, refs, { locks });
+  const res = classifyGrid(img, xs, ys, refs, { locks, dewatermark });
   return { ...res, rows, cols, geom: { xs, ys, pitch: (gx.pitch + gy.pitch) / 2, dbg } };
 }
 

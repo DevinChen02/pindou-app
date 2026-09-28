@@ -605,3 +605,45 @@ main.build-view { position: fixed; left: 0; right: 0; bottom: 0; top: calc(var(-
 .ov-check .ck-row:first-of-type { border-top: 0; }
 .ov-check .sw { width: 22px; height: 22px; border-radius: 6px; flex-shrink: 0; box-shadow: inset 0 0 0 1px rgba(0,0,0,.12); }
 .spinner.sm { width: 18px; height: 18px; border-width: 3px; margin: 0; flex-shrink: 0; }
+.inv-tools .row input[type=search] { flex: 1; min-width: 0; }
+.inv-sort { flex-shrink: 0; white-space: nowrap; }
+.batch-grid { max-height: 38vh; overflow-y: auto; }
+.batch-act { margin-top: 10px; flex-wrap: wrap; }
+.batch-act .input.num { width: 96px; }
+.series-tabs .tab { position: relative; }
+.tab-n { position: absolute; top: -6px; right: -4px; background: var(--accent); color: #fff; border-radius: 999px; font-size: 10px; line-height: 16px; min-width: 16px; padding: 0 4px; }
+.colors-img img { max-height: 46vh; object-fit: contain; }
+.colors-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.colors-chip { display: flex; align-items: center; gap: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px 8px 4px 4px; }
+.colors-chip .n { font-size: 13px; font-weight: 650; color: var(--muted); font-variant-numeric: tabular-nums; }
+.colors-chip.added { border-color: var(--accent); }
+
+/* ---- 准备拼豆板（框选 → 识别网格 → 拼豆板尺寸 → 摆放） ---- */
+.su-steps { display: flex; gap: 4px; margin: 4px 0 10px; font-size: 12px; font-weight: 650; color: var(--muted); overflow-x: auto; }
+.su-steps span { flex: 1; min-width: max-content; text-align: center; padding: 6px 6px; border-radius: 999px; background: var(--card-2); }
+.su-steps span.on { background: var(--accent); color: #fff; }
+.su-steps span.done { color: var(--ok); }
+.su-sum { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+.su-prev-wrap { display: flex; justify-content: center; margin-top: 4px; }
+.su-preview { border-radius: 10px; box-shadow: 0 1px 6px rgba(0,0,0,.18); max-width: 100%; cursor: zoom-in; }
+.su-pegs { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.su-peg { position: relative; display: flex; border: 2px solid var(--line); border-radius: 14px; background: var(--card); overflow: hidden; }
+.su-peg.on { border-color: var(--accent); }
+.su-peg.no { opacity: .5; }
+.su-peg-main { flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; border: 0; background: none; text-align: left; cursor: pointer; color: var(--text); }
+.su-peg-main b { font-size: 18px; }
+.su-peg-main .tiny { color: var(--muted); }
+.su-peg.no .su-peg-main .tiny { color: var(--bad); }
+.su-peg-x { border: 0; background: none; color: var(--muted); padding: 0 10px; cursor: pointer; font-size: 14px; }
+.su-custom .input.num { width: 110px; }
+.su-place { padding: 10px 12px calc(var(--safe-b) + 10px); display: flex; flex-direction: column; gap: 8px; }
+.su-read { color: var(--muted); font-variant-numeric: tabular-nums; }
+.su-place-row { align-items: center; }
+.su-pad { display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 42px); gap: 4px; flex-shrink: 0; }
+.su-arrow { border: 0; border-radius: 10px; background: var(--card-2); font-size: 20px; font-weight: 700; cursor: pointer; touch-action: none; user-select: none; -webkit-user-select: none; color: var(--text); }
+.su-arrow:active { background: var(--accent-soft); }
+.su-arrow.mid { font-size: 12px; }
+.bd-zoom .bd-mirror.on { background: var(--accent); }
+.bd-mirror-tag { position: absolute; left: 10px; bottom: 14px; background: rgba(30,30,32,.72); color: #fff; font-size: 12px; font-weight: 650; padding: 5px 10px; border-radius: 999px; pointer-events: none; }
+.su-dw { display: flex; align-items: center; gap: 10px; background: var(--card); border-radius: 14px; padding: 10px 12px; margin-top: 10px; }
+.su-dw input { width: 22px; height: 22px; flex-shrink: 0; accent-color: var(--accent); }

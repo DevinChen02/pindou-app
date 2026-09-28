@@ -4,7 +4,7 @@ import { hexOf } from '../palette.js';
 import { colorCheck, itemIssues, totalsCheck, newId } from '../extract/index.js';
 import * as store from '../store.js';
 import { openImageViewer, entriesFromImages, hasViewable } from '../viewer.js';
-import { renderOverview, hasOverview } from './overview.js';
+import { renderOverview, hasOverview, addColorSheet } from './overview.js';
 
 function issueLevel(item, s) {
   const is = itemIssues(item, s);
@@ -18,6 +18,10 @@ export async function renderVerify(app) {
   if (!s) { app.rec.step = 'pick'; return app.render(); }
   if (s.mode === 'overview') {
     if (hasOverview(s)) return renderOverview(app, { discard });
+    s.mode = s.items.length ? 'card' : 'list';
+  }
+  if (s.mode === 'colors') {
+    if (hasColorsStep(s)) return renderColors(app);
     s.mode = s.items.length ? 'card' : 'list';
   }
   if (s.mode === 'list' || !s.items.length) return renderList(app);
@@ -43,6 +47,49 @@ async function discard(app) {
   app.render();
 }
 
+// ---------- 第一步：颜色齐不齐（没有位置信息、但附了截图时；有位置信息的用“识别总览”） ----------
+
+/** 有截图可对照、又没有位置信息（总览画不出框）时，先单独看一眼颜色齐不齐 */
+export function hasColorsStep(s) {
+  return !hasOverview(s) && hasViewable(s.images);
+}
+/** 回到“看颜色齐不齐”那一步的按钮（总览或颜色页） */
+function phase1Button(app, s) {
+  if (hasOverview(s)) return h('button.btn.sm.soft', { onclick: () => { s.mode = 'overview'; app.saveSession(); app.render(); } }, '总览');
+  if (hasColorsStep(s)) return h('button.btn.sm.soft', { onclick: () => { s.mode = 'colors'; app.saveSession(); app.render(); } }, '颜色');
+  return null;
+}
+
+function renderColors(app) {
+  const s = app.rec.session;
+  app.setTitle('先看颜色齐不齐');
+  app.setBack(() => discard(app));
+  app.actions.append(h('button.btn.sm.soft', { onclick: () => { s.mode = 'list'; app.saveSession(); app.render(); } }, '列表'));
+  const view = clear(app.view);
+  const t = totalsCheck(s);
+  view.append(h('div.banner.info', h('span.ico', '👀'), h('div',
+    h('b', '先对着整张图看一遍：图上的每种颜色下面都有吗？'),
+    h('div.small', '漏掉的点“补一个漏掉的颜色”，可以连着补好几个；全齐了再逐个核对数量。'))));
+  s.images.forEach((im, k) => {
+    if (!(im.display || im.fullId)) return;
+    const open = () => openImageViewer(entriesFromImages(s.images), { index: k, view: im.display ? 'legend' : 'full', focus: false });
+    view.append(im.display
+      ? h('div.ref', h('div.ref-full.colors-img', { onclick: open }, h('img', { src: im.display, alt: '清单' }), h('span.tap', '点开放大')))
+      : h('button.btn.block.soft', { onclick: open }, `🖼 看${s.images.length > 1 ? `第 ${k + 1} 张` : ''}原图`));
+  });
+  view.append(h('div.section-title', `识别出 ${t.colors} 种颜色${s.statedColors ? `（图上写 ${s.statedColors} 色）` : ''}`));
+  view.append(h('div.colors-chips', s.items.map(it => h('div.colors-chip' + (it.added ? '.added' : ''),
+    chip(it.code || '?', { size: 'sm', label: it.code || it.rawCode || '?' }),
+    h('span.n', it.count != null ? `×${fmtNum(it.count)}` : '×?')))));
+  view.append(h('button.btn.soft.block', { style: { marginTop: '12px' }, onclick: async () => { if (await addColorSheet(app)) app.rerender(); } }, '＋ 补一个漏掉的颜色'));
+  view.append(h('div.sticky-actions',
+    s.items.length
+      ? h('button.btn.primary.big.block', {
+        onclick: () => { s.mode = 'card'; const k = s.items.findIndex(i => !i.verified); s.cursor = k >= 0 ? k : 0; app.saveSession(); app.render(); },
+      }, `颜色齐了，开始核对数量（${s.items.length} 项）`)
+      : null));
+}
+
 // ---------- 逐项卡片 ----------
 
 function renderCard(app) {
@@ -53,7 +100,8 @@ function renderCard(app) {
   const doneN = s.items.filter(i => i.verified).length;
   app.setTitle('逐项核对');
   app.setBack(() => discard(app));
-  if (hasOverview(s)) app.actions.append(h('button.btn.sm.soft', { onclick: () => { s.mode = 'overview'; app.saveSession(); app.render(); } }, '总览'));
+  const p1 = phase1Button(app, s);
+  if (p1) app.actions.append(p1);
   app.actions.append(h('button.btn.sm.soft', { onclick: () => { s.mode = 'list'; app.saveSession(); app.render(); } }, '列表'));
   const view = clear(app.view);
 
@@ -231,7 +279,8 @@ function renderList(app) {
   const s = app.rec.session;
   app.setTitle('核对结果');
   app.setBack(() => discard(app));
-  if (hasOverview(s)) app.actions.append(h('button.btn.sm.soft', { onclick: () => { s.mode = 'overview'; app.saveSession(); app.render(); } }, '总览'));
+  const p1 = phase1Button(app, s);
+  if (p1) app.actions.append(p1);
   if (s.items.length) app.actions.append(h('button.btn.sm.soft', { onclick: () => { s.mode = 'card'; const k = s.items.findIndex(i => !i.verified); s.cursor = k >= 0 ? k : 0; app.saveSession(); app.render(); } }, '逐项'));
   const view = clear(app.view);
   const t = totalsCheck(s);

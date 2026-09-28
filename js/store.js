@@ -27,6 +27,9 @@ export const DEFAULT_SETTINGS = {
   defaultThreshold: 100,
   lossPercent: 0,
   restockPresets: [100, 500, 1000],
+  invSort: 'code',                  // 库存排序：code（色号）| stock（数量从多到少）
+  dewatermark: true,                // 生成拼豆板时去水印（识别时不受水印影响）
+  pegboards: [[52, 52], [78, 78], [104, 104]], // 常用拼豆板尺寸（列 × 行）
 };
 
 function merge(base, over) {
@@ -220,7 +223,8 @@ export async function listTransactions() {
 // ---------- 图纸 ----------
 // 图纸：{ id, name, tags:[], status:'pending'|'building'|'done', items:[{code,count}], images, imageIds, thumbs,
 //         board?:{ rows, cols, codes, cells, stats, ... }  拼豆板（数字化的网格）
-//         build?:{ startedAt, done:[色号], deducted:{色号:已扣颗数}, txIds:[], finishedAt, partial } 拼豆进度 }
+//         build?:{ startedAt, done:[色号], deducted:{色号:已扣颗数}, txIds:[], finishedAt, partial } 拼豆进度,
+//         history?:[{ startedAt, endedAt, done, deducted, txIds }] 中途放弃的几次（图纸已放回待拼） }
 
 /** 撤销某笔扣减后，图纸回到什么状态 */
 function patternAfterUndo(p, tx) {
@@ -312,13 +316,18 @@ export async function setColorDone(id, code, done) {
  * 结算：把这些颗数从库存扣掉，记一笔流水，更新拼豆进度。
  * amounts: { 色号: 颗数 }；finish=true 表示这幅图结束了（全部拼好，或不拼了）
  */
-export async function settleBuild(id, amounts, { finish = false, partial = false, note = '' } = {}) {
+export async function settleBuild(id, amounts, { finish = false, partial = false, abandon = false, note = '' } = {}) {
   const changes = Object.entries(amounts).filter(([, n]) => n > 0).map(([code, n]) => ({ code, delta: -n }));
   const patch = (p, txId, time, txDeltas) => {
     const b = p.build || { startedAt: time, done: [], deducted: {}, txIds: [] };
     const deducted = { ...(b.deducted || {}) };
     for (const d of txDeltas) deducted[d.code] = (deducted[d.code] || 0) - d.delta;
     const nb = { ...b, deducted, txIds: txId != null ? [...(b.txIds || []), txId] : (b.txIds || []) };
+    if (abandon) {
+      // 这次不拼了：扣掉的就扣掉了（记在历史里），图纸放回“待拼”，下次开始拼豆是全新的一次
+      const hist = { startedAt: nb.startedAt, endedAt: time, done: nb.done || [], deducted, txIds: nb.txIds };
+      return { ...p, build: null, status: 'pending', txId: null, doneAt: null, history: [...(p.history || []), hist] };
+    }
     if (finish) Object.assign(nb, { finishedAt: time, partial });
     return { ...p, build: nb, status: finish ? 'done' : 'building', txId, doneAt: finish ? time : p.doneAt || null };
   };
