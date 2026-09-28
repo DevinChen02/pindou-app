@@ -213,7 +213,8 @@ async function renderDetail(app) {
     view.append(h('div.card.pd-build',
       h('div.row.between', h('b', '拼豆中'), h('span.small.muted', `已拼好 ${nDone}/${p.items.length} 色`)),
       h('div.progress', { style: { marginTop: '8px' } }, h('i', { style: { width: (nDone / p.items.length * 100) + '%' } })),
-      Object.keys(p.build?.deducted || {}).length ? h('div.tiny.muted', { style: { marginTop: '6px' } }, `已经从库存扣过：${Object.entries(p.build.deducted).filter(([, n]) => n > 0).map(([c, n]) => `${c}×${n}`).join('、')}`) : null));
+      Object.keys(p.build?.deducted || {}).length ? h('div.tiny.muted', { style: { marginTop: '6px' } }, `已经从库存扣过：${Object.entries(p.build.deducted).filter(([, n]) => n > 0).map(([c, n]) => `${c}×${n}`).join('、')}`) : null,
+      h('div.row.end', { style: { marginTop: '6px' } }, h('button.link.small.pd-revert', { onclick: () => revertPending(app, p) }, '↩ 撤回为待拼'))));
   }
   if (p.status === 'done') {
     view.append(h('div.banner.ok', h('span.ico', '✅'), h('div',
@@ -360,6 +361,24 @@ async function manageTags(app) {
         s.close(); toast('已删除'); app.rerender();
       },
     }, '删除')))), { title: '管理分类', tall: true });
+}
+
+/** 拼豆中 → 撤回为待拼（打的勾清空，扣过的库存加回来） */
+export async function revertPending(app, p) {
+  const ticks = (p.build?.done || []).length;
+  const ded = Object.entries(p.build?.deducted || {}).filter(([, n]) => n > 0);
+  const detail = [
+    ticks ? `已打的勾（${ticks} 色）会清空。` : '还没有打勾的颜色。',
+    ded.length ? `这次已经从库存扣掉的 ${ded.map(([c, n]) => `${c}×${n}`).join('、')} 会加回库存。` : '没有扣过库存。',
+    '拼豆板、拼豆板尺寸和摆放位置都保留，以后点“开始拼豆”直接从头拼。',
+  ].join('\n');
+  if (!(await confirmDialog(`把“${p.name}”撤回为待拼？`, { ok: '撤回为待拼', detail }))) return false;
+  try {
+    await store.revertToPending(p.id);
+    toast('已撤回为待拼', 'ok');
+    goPattern(app, p.id);
+    return true;
+  } catch (e) { toast(e.message, 'error'); return false; }
 }
 
 async function startBuild(app, p) {

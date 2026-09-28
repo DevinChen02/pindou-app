@@ -1,15 +1,15 @@
 // 开始拼豆：把图纸数字化成拼豆板（可缩放，每 5 格一条引导线），选一个颜色只看这个颜色，
 // 拼好一个颜色打一个勾；全部拼好后扣库存。中途可以结束：拼好的扣掉，没拼的放回库存。
-import { h, clear, toast, sheet, confirmDialog, chip, fmtNum, stepper, pickCode } from '../ui.js';
+import { h, clear, toast, sheet, confirmDialog, chip, fmtNum, stepper, pickCode, icon, optionSheet } from '../ui.js';
 import * as store from '../store.js';
 import { packCells, unpackCells, boardRecord, locksFor } from '../board.js';
 import { runBoard } from '../boardasync.js';
 import { boardReview, verifyIdentities, identityRisks } from '../cells.js';
 import { createPanZoom } from '../panzoom.js';
-import { rgbOf, isCode } from '../palette.js';
+import { rgbOf, isCode, codeCompare } from '../palette.js';
 import { openImageViewer, entriesFromImages } from '../viewer.js';
 import { makeCanvas, contentBounds, guessLegendRect } from '../image.js';
-import { goPattern, finishAndShow } from './patterns.js';
+import { goPattern, finishAndShow, revertPending } from './patterns.js';
 import { renderSetup, startSetup, setupActive } from './boardsetup.js';
 
 const CELL = 20;          // 一格在拼豆板上的尺寸（内容坐标）
@@ -22,6 +22,36 @@ export const merged = p => {
   return [...m].map(([code, count]) => ({ code, count }));
 };
 const rgbFor = code => (isCode(code) ? rgbOf(code) : [180, 180, 180]);
+
+// ---------- 拼的顺序、板上怎么显示（设置里记住） ----------
+export const BUILD_ORDERS = [
+  { value: 'count', short: '多→少', label: '颗数多的先拼（推荐）', desc: '先把大面积的颜色拼上，剩下的小颜色有了参照更好找位置' },
+  { value: 'countAsc', short: '少→多', label: '颗数少的先拼', desc: '零散的小颜色先拼完' },
+  { value: 'code', short: '色号', label: '按色号', desc: 'A1、A2…，和色卡顺序一样' },
+  { value: 'list', short: '清单', label: '按图纸清单的顺序', desc: '和图纸上清单写的顺序一样' },
+];
+export const BUILD_SHOWS = [
+  { value: 'real', short: '像实物', label: '像实物（推荐）', desc: '正在拼的颜色是深色，已经拼好的是浅色，还没拼的先不画——和手上的拼豆板一模一样，最好对照' },
+  { value: 'fade', short: '三种深浅', label: '三种深浅', desc: '正在拼的最深，已经拼好的浅一些，还没拼的最淡（能看到整幅图，但很浅的颜色不太分得清）' },
+];
+const orderOf = settings => (BUILD_ORDERS.some(o => o.value === settings.buildOrder) ? settings.buildOrder : 'count');
+const showOf = settings => (settings.buildShow === 'fade' ? 'fade' : 'real');
+/** 颜色按选好的顺序排 */
+export function orderItems(items, order) {
+  const list = items.map((it, i) => ({ ...it, i }));
+  if (order === 'count') list.sort((a, b) => b.count - a.count || codeCompare(a.code, b.code));
+  else if (order === 'countAsc') list.sort((a, b) => a.count - b.count || codeCompare(a.code, b.code));
+  else if (order === 'code') list.sort((a, b) => codeCompare(a.code, b.code));
+  return list;
+}
+
+function viewSheet(app) {
+  const save = key => async v => { app.settings[key] = v; await store.saveSettings(app.settings); app.rerender(); };
+  optionSheet('拼的顺序和显示', [
+    { title: '先拼哪个颜色（底部颜色的排列、拼好后自动跳到的下一个）', value: orderOf(app.settings), options: BUILD_ORDERS, onPick: save('buildOrder') },
+    { title: '选了一个颜色时，板上怎么显示', value: showOf(app.settings), options: BUILD_SHOWS, onPick: save('buildShow') },
+  ]);
+}
 
 // ---------- 拼豆板生成 ----------
 
@@ -80,7 +110,8 @@ export async function renderBuild(app) {
   if (hasImg && ((!p.board?.place && !p.boardSkip) || setupActive(p))) return renderSetup(app, p);
   view.classList.add('build-view');
 
-  const items = merged(p);
+  const items = orderItems(merged(p), orderOf(app.settings));
+  const show = showOf(app.settings);
   const done = new Set(p.build?.done || []);
   if (bs.sel && !items.some(i => i.code === bs.sel)) bs.sel = null;
 
@@ -102,7 +133,12 @@ export async function renderBuild(app) {
       h('button.wide', { onclick: () => pz.fit() }, '适合'),
       h('button', { 'aria-label': '放大', onclick: () => pz.zoomBy(1.6) }, '＋'));
     if (place.mirror) stage.append(h('div.bd-mirror-tag', '镜像中（左右翻转）'));
-    stage.append(layer, info, zoomBar);
+    // 放大后行号、列号固定在左边、上边（选了颜色时，每行几颗固定在右边）
+    const selIdx = bs.sel ? board.codes.indexOf(bs.sel) + 1 : 0;
+    const rowCounts = selIdx ? new Array(place.H).fill(0) : null;
+    if (selIdx) for (let r = 0; r < board.rows; r++) for (let c = 0; c < board.cols; c++) if (board.cells[r * board.cols + c] === selIdx && r + place.oy >= 0 && r + place.oy < place.H) rowCounts[r + place.oy]++;
+    const rulers = makeRulers(stage, place, rowCounts);
+    stage.append(layer, ...rulers.els, info, zoomBar);
     if (bs.edit) stage.append(h('div.bd-editbar', h('span', '✏️ 修正模式：点格子改颜色'), h('button.btn.sm', { onclick: () => { bs.edit = false; app.rerender(); } }, '完成')));
     else if (reviewCount(board) && !board.reviewedAt && !bs.hideReview) {
       const rv = board.review;
@@ -117,7 +153,7 @@ export async function renderBuild(app) {
     const q = Math.max(1, Math.min(2.5, Math.sqrt(9e6 / (W * H))));
     canvas.width = Math.round(W * q); canvas.height = Math.round(H * q);
     canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
-    drawBoard(canvas.getContext('2d'), q, board, { sel: bs.sel, done, place });
+    drawBoard(canvas.getContext('2d'), q, board, { sel: bs.sel, done, place, show });
     let infoTimer = null;
     // 点格子会切换选中颜色、整页重画：提示条跟着带过去，别一闪就没了
     const showInfo = (text, until) => {
@@ -128,6 +164,7 @@ export async function renderBuild(app) {
     if (bs.info?.pid === p.id && bs.info.until > Date.now()) showInfo(bs.info.text, bs.info.until);
     const pz = createPanZoom(stage, layer, {
       maxFit: 14,
+      onChange: st => rulers.update(st),
       onTap: ({ x, y }) => {
         // 点的是拼豆板上第几行第几列（镜像时左右反过来），再换回图纸网格里的那一格
         const px = Math.floor((x - M) / CELL), py = Math.floor((y - M) / CELL);
@@ -168,6 +205,7 @@ export async function renderBuild(app) {
   const nDone = items.filter(i => done.has(i.code)).length;
   const allDone = nDone === items.length;
   const colors = h('div.hscroll.bd-colors',
+    h('button.bd-sortb', { 'aria-label': '拼的顺序和显示方式', onclick: () => viewSheet(app) }, icon('sort'), h('span.lab', BUILD_ORDERS.find(o => o.value === orderOf(app.settings)).short)),
     h('button.bd-color.all' + (!bs.sel ? '.on' : ''), { onclick: () => { bs.sel = null; app.rerender(); } }, h('span.lab', '全部'), h('span.n', `${items.length} 色`)),
     items.map(it => h('button.bd-color' + (bs.sel === it.code ? '.on' : '') + (done.has(it.code) ? '.done' : ''), {
       'data-code': it.code,
@@ -182,7 +220,7 @@ export async function renderBuild(app) {
       chip(it.code, { size: 'md' }),
       h('div.grow',
         h('b', `${it.code} · ${fmtNum(it.count)} 颗`),
-        board ? h('div.tiny.muted', bc === it.count ? '板上只显示这个颜色，右边数字是每行几颗' : `板上 ${bc} / 清单 ${it.count}`) : null),
+        board ? h('div.tiny.muted', (bc === it.count ? '' : `板上 ${bc} / 清单 ${it.count} · `) + (show === 'real' ? '浅色 = 已拼好，没拼的先不画，右边红字 = 每行几颗' : '浅色 = 已拼好，最淡 = 还没拼，右边红字 = 每行几颗')) : null),
       h('button.btn' + (isDone ? '.ghost' : '.ok'), {
         onclick: async () => {
           await store.setColorDone(p.id, it.code, !isDone);
@@ -218,8 +256,13 @@ async function toggleMirror(app, p) {
   app.rerender();
 }
 
-/** 画拼豆板：每格一颗豆子（有孔的圆），空格是小钉；每 5 格一条粗线，边上标坐标 */
-export function drawBoard(g, q, board, { sel, done, place = null }) {
+/**
+ * 画拼豆板：每格一颗豆子（有孔的圆），空格是小钉；每 5 格一条粗线，边上标坐标。
+ * 选了一个颜色时豆子分三种：正在拼（深色）、已拼好（浅色）、还没拼——
+ *   show='real'：还没拼的不画（和手上的拼豆板一样）；show='fade'：还没拼的画得最淡。
+ * 没选颜色（看全部）时：已拼好的浅色，其余正常。
+ */
+export function drawBoard(g, q, board, { sel, done, place = null, show = 'real' }) {
   const P = place || placeOf(board);
   const { cells, codes } = board;
   const rows = P.H, cols = P.W;
@@ -260,15 +303,23 @@ export function drawBoard(g, q, board, { sel, done, place = null }) {
         continue;
       }
       const code = codes[v - 1];
-      let alpha = 1;
-      if (selIdx) alpha = v === selIdx ? 1 : 0.1;
-      else if (done.has(code)) alpha = 0.3;
       if (v === selIdx) rowCount[r]++;
-      const [R, G, B] = colorOf[v - 1] || [180, 180, 180];
-      g.globalAlpha = alpha;
+      // 这颗豆子现在是哪种：cur 正在拼 / done 已拼好 / todo 还没拼
+      const stage = v === selIdx ? 'cur' : done.has(code) ? 'done' : selIdx ? 'todo' : 'cur';
+      if (stage === 'todo' && show === 'real') {
+        g.fillStyle = '#dedbd4';
+        g.beginPath(); g.arc(cx, cy, 1.4, 0, Math.PI * 2); g.fill();
+        continue;
+      }
+      let [R, G, B] = colorOf[v - 1] || [180, 180, 180];
+      if (stage === 'done') {
+        // 浅色：往白色掺 60%，描一圈淡边——白色、米色的豆子也看得出来
+        R = Math.round(R + (255 - R) * 0.6); G = Math.round(G + (255 - G) * 0.6); B = Math.round(B + (255 - B) * 0.6);
+      }
+      g.globalAlpha = stage === 'todo' ? 0.1 : 1;
       g.fillStyle = `rgb(${R},${G},${B})`;
       g.beginPath(); g.arc(cx, cy, rad, 0, Math.PI * 2); g.fill();
-      g.lineWidth = 1; g.strokeStyle = 'rgba(0,0,0,.28)'; g.stroke();
+      g.lineWidth = 1; g.strokeStyle = stage === 'done' ? 'rgba(0,0,0,.2)' : 'rgba(0,0,0,.28)'; g.stroke();
       const lum = 0.299 * R + 0.587 * G + 0.114 * B;
       g.fillStyle = lum > 200 ? 'rgba(0,0,0,.14)' : 'rgba(255,255,255,.55)';
       g.beginPath(); g.arc(cx, cy, hole, 0, Math.PI * 2); g.fill();
@@ -291,6 +342,86 @@ export function drawBoard(g, q, board, { sel, done, place = null }) {
     g.textAlign = 'left'; g.fillStyle = '#e8604c'; g.font = `700 9px -apple-system, sans-serif`;
     rowCount.forEach((n, r) => { if (n) g.fillText(String(n), M + cols * CELL + 4, M + (r + 0.5) * CELL); });
   }
+}
+
+// ---------- 固定在边上的行号、列号 ----------
+
+/**
+ * 放大后，画布上自带的行号（左边）、列号（上边）会移出屏幕：在舞台边上盖三条尺子，
+ * 跟着缩放平移实时重画——左边行号、上边列号；选了颜色时右边是每行几颗。
+ * 画布自带的那排数字还在屏幕里时，对应的尺子不显示。
+ */
+function makeRulers(stage, P, rowCounts) {
+  const TH = 20, LW = 28, RW = 24;
+  const top = h('canvas.bd-ruler.top'), left = h('canvas.bd-ruler.left'), right = h('canvas.bd-ruler.right');
+  for (const c of [top, left, right]) c.style.display = 'none';
+  let raf = 0, last = null;
+  const font = w => `${w} 10px -apple-system, "PingFang SC", sans-serif`;
+  const prep = (cv, w, hh) => {
+    const dpr = Math.min(3, window.devicePixelRatio || 1);
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(hh * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(hh * dpr); }
+    cv.style.width = w + 'px'; cv.style.height = hh + 'px'; cv.style.display = '';
+    const g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, hh);
+    g.fillStyle = 'rgba(247,246,243,.95)'; g.fillRect(0, 0, w, hh);
+    return g;
+  };
+  // 格子在屏幕上多大决定隔几格标一个数（数字至少要 ~16 像素宽）
+  const stepFor = px => (px >= 16 ? 1 : px * 5 >= 18 ? 5 : 10);
+  function draw(st) {
+    const sw = stage.clientWidth, sh = stage.clientHeight, cs = CELL * st.s;
+    // 画布自带的数字（上边中线 M/2、左边右对齐到 M-4）移出屏幕了才盖尺子，不挡住没放大时的豆子
+    const showTop = st.ty + (M / 2) * st.s < 4;
+    const showLeft = st.tx + (M - 10) * st.s < 2;
+    const showRight = !!rowCounts && st.tx + (M + P.W * CELL + 4) * st.s > sw - RW;
+    const x0 = showLeft ? LW : 0, y0 = showTop ? TH : 0, x1 = showRight ? sw - RW : sw;
+    if (showTop) {
+      const g = prep(top, sw, TH), step = stepFor(cs);
+      g.strokeStyle = 'rgba(0,0,0,.14)'; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(0, TH - 0.5); g.lineTo(sw, TH - 0.5); g.stroke();
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      for (let c = 0; c < P.W; c++) {
+        const n = c + 1;
+        if (!(step === 1 || n % step === 0 || (n === 1 && step === 5))) continue;
+        const x = st.tx + (M + (c + 0.5) * CELL) * st.s;
+        if (x < x0 + 6 || x > x1 - 6) continue;
+        g.font = font(n % 5 === 0 ? 700 : 500); g.fillStyle = n % 5 === 0 ? '#3a3d42' : '#80848a';
+        g.fillText(String(n), x, TH / 2 + 1);
+      }
+    } else top.style.display = 'none';
+    if (showLeft) {
+      const g = prep(left, LW, sh), step = stepFor(cs);
+      g.strokeStyle = 'rgba(0,0,0,.14)'; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(LW - 0.5, 0); g.lineTo(LW - 0.5, sh); g.stroke();
+      g.textAlign = 'right'; g.textBaseline = 'middle';
+      for (let r = 0; r < P.H; r++) {
+        const n = r + 1;
+        if (!(step === 1 || n % step === 0 || (n === 1 && step === 5))) continue;
+        const y = st.ty + (M + (r + 0.5) * CELL) * st.s;
+        if (y < y0 + 5 || y > sh - 5) continue;
+        g.font = font(n % 5 === 0 ? 700 : 500); g.fillStyle = n % 5 === 0 ? '#3a3d42' : '#80848a';
+        g.fillText(String(n), LW - 5, y);
+      }
+      if (showTop) { g.fillStyle = 'rgba(247,246,243,1)'; g.fillRect(0, 0, LW, TH); } // 左上角的空角
+    } else left.style.display = 'none';
+    if (showRight) {
+      const g = prep(right, RW, sh);
+      g.strokeStyle = 'rgba(0,0,0,.14)'; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(0.5, 0); g.lineTo(0.5, sh); g.stroke();
+      g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = font(700); g.fillStyle = '#e8604c';
+      for (let r = 0; r < P.H; r++) {
+        if (!rowCounts[r]) continue;
+        const y = st.ty + (M + (r + 0.5) * CELL) * st.s;
+        if (y < y0 + 5 || y > sh - 5) continue;
+        g.fillText(String(rowCounts[r]), RW / 2, y);
+      }
+    } else right.style.display = 'none';
+  }
+  return {
+    els: [top, left, right],
+    update(st) { last = { s: st.s, tx: st.tx, ty: st.ty }; if (!raf) raf = requestAnimationFrame(() => { raf = 0; if (stage.isConnected) draw(last); }); },
+  };
 }
 
 // ---------- 修正格子 ----------
@@ -343,7 +474,9 @@ function menu(app, p) {
         app.rerender();
       },
     }, '🔲 重新框选拼豆板 / 重新识别') : null,
+    h('button', { onclick: () => { s.close(); viewSheet(app); } }, '🎨 拼的顺序和显示方式'),
     h('button', { onclick: () => { s.close(); endSheet(app, p); } }, '⏸ 先拼到这里（结算库存）'),
+    p.status === 'building' ? h('button', { onclick: () => { s.close(); revertPending(app, p); } }, '↩ 撤回为待拼（还没开始拼 / 以后再拼）') : null,
   ), { title: '拼豆' });
 }
 

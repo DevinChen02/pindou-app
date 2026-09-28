@@ -64,7 +64,13 @@ export async function renderSetup(app, p) {
   const back = () => {
     const i = steps.indexOf(st.step);
     // 从拼豆页“换尺寸”进来的，往回退到头就回拼豆页
-    if (i <= 0 || (p.board?.place && st.step === 'peg' && !st.pix)) { endSetup(); return p.board?.place ? app.rerender() : goPattern(app, p.id); }
+    if (i <= 0 || (p.board?.place && st.step === 'peg' && !st.pix)) {
+      endSetup();
+      if (p.board?.place) return app.rerender();
+      // 第一次设置就退出来了（还没见到拼豆板）：没打勾、没扣库存的话，图纸还算“待拼”
+      if (p.status === 'building' && !store.buildTouched(p)) return store.patchPattern(p.id, { status: 'pending', build: null }).then(() => goPattern(app, p.id));
+      return goPattern(app, p.id);
+    }
     st.step = steps[i - 1];
     app.rerender();
   };

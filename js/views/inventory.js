@@ -1,5 +1,5 @@
 // “库存”标签：每个色号还剩多少、待补货、补货/盘点、批量录入。
-import { h, clear, toast, sheet, chip, fmtNum, fmtTime, confirmDialog } from '../ui.js';
+import { h, clear, toast, sheet, chip, fmtNum, fmtTime, confirmDialog, icon, optionSheet } from '../ui.js';
 import { PALETTE, SERIES, BASE_SERIES, hexOf, normalizeCode, seriesLabel } from '../palette.js';
 import { parseLegendText } from '../extract/text.js';
 import * as store from '../store.js';
@@ -28,10 +28,13 @@ export async function renderInventory(app) {
 
   const search = h('input.input', { type: 'search', placeholder: '搜索色号，如 H7', value: ui.q, autocapitalize: 'characters', autocomplete: 'off' });
   const grid = h('div.inv-grid');
-  const byStock = settings.invSort === 'stock';
+  const sortKey = invSortOf(settings);
   const list = [...PALETTE.values()];
-  // 按数量从多到少（没录入的排最后）；数量一样按色号
-  if (byStock) list.sort((a, b) => (inv.get(b.code)?.stock ?? -1) - (inv.get(a.code)?.stock ?? -1));
+  // 按数量排：没录入的（多半没买过这个颜色）总是排最后；数量一样按色号
+  const stockOf = p => inv.get(p.code)?.stock;
+  if (sortKey === 'asc') list.sort((a, b) => (stockOf(a) == null) - (stockOf(b) == null) || (stockOf(a) ?? 0) - (stockOf(b) ?? 0));
+  if (sortKey === 'desc') list.sort((a, b) => (stockOf(a) == null) - (stockOf(b) == null) || (stockOf(b) ?? 0) - (stockOf(a) ?? 0));
+  const countEl = h('span.small.muted');
   const draw = () => {
     clear(grid);
     const q = ui.q.trim().toUpperCase();
@@ -50,6 +53,7 @@ export async function renderInventory(app) {
         h('div.n', rec ? fmtNum(stock) : '未录入'),
         isLow ? h('span.flag', '!') : null));
     }
+    countEl.textContent = `${n} 色`;
     if (!n) grid.append(h('div.empty', { style: { gridColumn: '1 / -1' } },
       h('div.big-ico', ui.filter === 'low' ? '👍' : '🫘'),
       h('p', ui.filter === 'low' ? '没有需要补货的颜色' : ui.filter === 'owned' ? '还没有录入库存' : '没有匹配的色号'),
@@ -64,16 +68,11 @@ export async function renderInventory(app) {
       h('button' + (ui.filter === k ? '.on' : ''), { onclick: pick(() => { ui.filter = k; }) }, label)),
     h('span', { style: { width: '8px', flexShrink: 0 } }),
     ['all', ...SERIES].map(sr => h('button' + (ui.series === sr ? '.on' : ''), { onclick: pick(() => { ui.series = sr; }) }, sr === 'all' ? '全系列' : seriesLabel(sr))));
-  const sortBtn = h('button.btn.sm.soft.inv-sort', {
-    'aria-label': '排序',
-    onclick: async () => {
-      settings.invSort = byStock ? 'code' : 'stock';
-      await store.saveSettings(settings);
-      app.rerender();
-    },
-  }, byStock ? '↓ 数量' : '按色号');
+  // 排序：在列表上方右边（像“按色号 ▾”的下拉），点开选排序方式
+  const sortBtn = h('button.inv-sort', { 'aria-label': '排序方式', onclick: () => sortSheet(app) },
+    icon('sort'), h('span', INV_SORTS.find(o => o.value === sortKey).short), h('span.caret', '▾'));
 
-  view.append(segs, h('div.inv-tools', h('div.row.gap-s', search, sortBtn), filters));
+  view.append(segs, h('div.inv-tools', search, filters, h('div.inv-head', countEl, sortBtn)));
   filters.scrollLeft = ui.filtersScroll;
   requestAnimationFrame(() => { filters.scrollLeft = ui.filtersScroll; });
   if (lows.length && ui.filter !== 'low') {
@@ -82,6 +81,22 @@ export async function renderInventory(app) {
   }
   view.append(grid);
   draw();
+}
+
+// ---------- 排序 ----------
+const INV_SORTS = [
+  { value: 'code', short: '按色号', label: '按色号', desc: 'A1、A2…，和色卡顺序一样' },
+  { value: 'asc', short: '数量少→多', label: '按数量：少 → 多', desc: '快用完的排在最前面，一眼看出要补哪些（没录入的排最后）' },
+  { value: 'desc', short: '数量多→少', label: '按数量：多 → 少', desc: '存货最多的排在前面' },
+];
+/** 旧设置里的 'stock' 当成“少→多” */
+const invSortOf = settings => (settings.invSort === 'stock' ? 'asc' : INV_SORTS.some(o => o.value === settings.invSort) ? settings.invSort : 'code');
+
+function sortSheet(app) {
+  optionSheet('排序方式', [{
+    value: invSortOf(app.settings), options: INV_SORTS,
+    onPick: async v => { app.settings.invSort = v; await store.saveSettings(app.settings); app.rerender(); },
+  }]);
 }
 
 async function editSheet(app, code) {

@@ -27,7 +27,9 @@ export const DEFAULT_SETTINGS = {
   defaultThreshold: 100,
   lossPercent: 0,
   restockPresets: [100, 500, 1000],
-  invSort: 'code',                  // 库存排序：code（色号）| stock（数量从多到少）
+  invSort: 'code',                  // 库存排序：code（色号）| asc（数量少→多）| desc（数量多→少）
+  buildOrder: 'count',              // 拼的顺序：count（颗数多的先拼）| countAsc | code | list（清单顺序）
+  buildShow: 'real',                // 选了颜色时板上：real（没拼的不画，像实物）| fade（三种深浅）
   dewatermark: true,                // 生成拼豆板时去水印（识别时不受水印影响）
   pegboards: [[52, 52], [78, 78], [104, 104]], // 常用拼豆板尺寸（列 × 行）
 };
@@ -310,6 +312,26 @@ export async function setColorDone(id, code, done) {
     if (done) set.add(code); else set.delete(code);
     return { ...p, status: p.status === 'done' ? p.status : 'building', build: { ...b, done: [...set] } };
   });
+}
+
+/** 还算不算“开始拼了”：打过勾，或者扣过库存（没撤销） */
+export function buildTouched(p) {
+  return !!(p.build && ((p.build.done || []).length || Object.values(p.build.deducted || {}).some(n => n > 0)));
+}
+
+/**
+ * 撤回为“待拼”（点错了开始拼豆 / 想以后再拼）：像没开始过一样——打的勾清空；
+ * 这次拼豆扣过的库存全部加回来（每笔扣减记一笔“撤销”流水）。拼豆板和摆放位置保留。
+ */
+export async function revertToPending(id) {
+  const p = await db.get('patterns', id);
+  if (!p) throw new Error('图纸不存在了');
+  if (p.status !== 'building') throw new Error('只有“拼豆中”的图纸可以撤回');
+  for (const txId of [...(p.build?.txIds || [])].reverse()) {
+    const tx = await db.get('transactions', txId);
+    if (tx && !tx.undone) await undoTransaction(txId);
+  }
+  return patchPattern(id, q => ({ ...q, build: null, status: 'pending', txId: null, doneAt: null }));
 }
 
 /**

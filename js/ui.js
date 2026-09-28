@@ -67,6 +67,29 @@ export function sheet(content, { title, onClose, tall = false } = {}) {
   return { el: panel, close };
 }
 
+// 小图标（线条，跟着文字颜色）
+const ICONS = {
+  // 排序：长短不一的三条线 + 上下箭头
+  sort: '<path d="M3 6h9M3 12h6.5M3 18h4"/><path d="M17 4v16M13.5 7.5 17 4l3.5 3.5M13.5 16.5 17 20l3.5-3.5"/>',
+  // 显示设置：两个滑杆
+  sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/>',
+};
+export function icon(name) {
+  return h('span.ico-svg', { 'aria-hidden': 'true', html: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ''}</svg>` });
+}
+
+/** 单选列表（每项一行：标题 + 说明，当前项打勾）。groups: [{ title, value, options:[{ value, label, desc }] , onPick(v) }] */
+export function optionSheet(title, groups) {
+  const s = sheet(groups.map(g => [
+    g.title ? h('div.section-title', g.title) : null,
+    h('div.opt-list', g.options.map(o => h('button.opt' + (o.value === g.value ? '.on' : ''), {
+      'data-value': o.value,
+      onclick: async () => { s.close(); await g.onPick(o.value); },
+    }, h('div.grow', h('div.opt-t', o.label), o.desc ? h('div.tiny.muted', o.desc) : null), h('span.opt-ck', o.value === g.value ? '✓' : '')))),
+  ]), { title });
+  return s;
+}
+
 export function confirmDialog(message, { ok = '确定', cancel = '取消', danger = false, detail } = {}) {
   return new Promise(resolve => {
     const s = sheet([
