@@ -666,3 +666,9 @@ main.build-view { position: fixed; left: 0; right: 0; bottom: 0; top: calc(var(-
 .bd-ruler.right { right: 0; top: 0; bottom: 0; }
 .bd-legend { display: flex; gap: 10px; flex-wrap: wrap; }
 .bd-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 3px; vertical-align: -1px; }
+/* 颜色条不吸附：点完颜色重画后停在原位，不会被吸到别的地方 */
+.bd-colors { scroll-snap-type: none; }
+/* 图纸多选：左边删除（红字浅底，不抢主按钮），右边看合计用量 */
+.sticky-actions.sel-actions { flex-direction: row; }
+.sel-actions .sel-del { flex-shrink: 0; background: var(--bad-soft, rgba(229, 72, 77, .12)); border-color: transparent; color: var(--bad); padding: 0 16px; }
+.sel-actions .sel-del:disabled { opacity: .45; }

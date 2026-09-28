@@ -98,7 +98,7 @@ function reviewCount(board) {
 export async function renderBuild(app) {
   const p = await store.getPattern(app.pat.id);
   if (!p) { app.pat.page = 'list'; return app.render(); }
-  if (bs.pid !== p.id) Object.assign(bs, { pid: p.id, sel: null, edit: false });
+  if (bs.pid !== p.id) Object.assign(bs, { pid: p.id, sel: null, edit: false, trayScroll: 0 });
   document.body.classList.add('mode-build');
   app.setTitle(p.name || '拼豆');
   app.setBack(() => { bs.edit = false; goPattern(app, p.id); });
@@ -211,6 +211,8 @@ export async function renderBuild(app) {
       'data-code': it.code,
       onclick: () => { bs.sel = bs.sel === it.code ? null : it.code; app.rerender(); },
     }, chip(it.code, { size: 'sm' }), h('span.n', fmtNum(it.count)), done.has(it.code) ? h('span.ck', '✓') : null)));
+  // 点颜色会整页重画：颜色条停在原来滑到的位置，不跳回最左边
+  colors.addEventListener('scroll', () => { bs.trayScroll = colors.scrollLeft; }, { passive: true });
   const tray = h('div.bd-tray', colors);
   if (bs.sel) {
     const it = items.find(i => i.code === bs.sel);
@@ -239,6 +241,23 @@ export async function renderBuild(app) {
       ? h('button.btn.primary', { onclick: () => finishAll(app, p) }, '🎉 全图已拼好')
       : h('button.btn.soft', { onclick: () => endSheet(app, p) }, '先拼到这里…')));
   view.append(stage, tray);
+  keepTrayScroll(colors);
+  requestAnimationFrame(() => keepTrayScroll(colors));
+}
+
+/** 颜色条放回上次的位置；选中的颜色（比如拼好后自动跳到的下一个）不在屏幕里时，才挪到刚好露出来 */
+function keepTrayScroll(colors) {
+  if (!colors.isConnected) return;
+  let x = bs.trayScroll || 0;
+  const on = bs.sel && colors.querySelector('.bd-color.on');
+  if (on) {
+    const base = colors.getBoundingClientRect().left;
+    const l = on.getBoundingClientRect().left - base + colors.scrollLeft, r = l + on.offsetWidth, w = colors.clientWidth;
+    if (l < x) x = Math.max(0, l - 12);
+    else if (r > x + w) x = r - w + 12;
+  }
+  colors.scrollLeft = x;
+  bs.trayScroll = colors.scrollLeft;
 }
 
 /** 拼豆板怎么摆：拼豆板 W×H 格，图纸网格 (r,c) 放在拼豆板 (r+oy, c+ox)；mirror = 左右翻转着看 */

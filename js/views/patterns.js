@@ -1,4 +1,4 @@
-// “图纸”标签：图纸库（搜索 / 按状态和分类筛选 / 多选算合计）→ 图纸详情 → 开始拼豆。
+// “图纸”标签：图纸库（搜索 / 按状态和分类筛选 / 多选算合计、多选删除）→ 图纸详情 → 开始拼豆。
 import { h, clear, toast, sheet, confirmDialog, chip, fmtNum, fmtTime, copyText, inputSheet } from '../ui.js';
 import * as store from '../store.js';
 import { newId } from '../extract/index.js';
@@ -146,12 +146,37 @@ async function renderList(app) {
   drawResults();
 
   if (sel) {
-    view.append(h('div.sticky-actions',
-      h('button.btn.primary.big.block', {
+    view.append(h('div.sticky-actions.sel-actions',
+      h('button.btn.danger.big.sel-del', {
+        disabled: !sel.size, 'aria-label': '删除选中的图纸',
+        onclick: () => deleteSelected(app, list.filter(p => sel.has(p.id))),
+      }, sel.size ? `🗑 删除 ${sel.size} 张` : '🗑 删除'),
+      h('button.btn.primary.big.grow', {
         disabled: !sel.size,
         onclick: () => { app.pat.page = 'totals'; ui.open = null; app.render(); },
-      }, sel.size ? `看合计用量（已选 ${sel.size} 张）` : '先选图纸')));
+      }, sel.size ? `看合计用量（${sel.size} 张）` : '先选图纸')));
   }
+}
+
+/** 多选后一起删除（确认时列出名字；扣过库存的提醒不会加回来） */
+async function deleteSelected(app, chosen) {
+  if (!chosen.length) return;
+  const deducted = chosen.filter(p => p.status === 'done' || Object.values(p.build?.deducted || {}).some(n => n > 0));
+  const names = chosen.map(p => `“${p.name || '未命名'}”`);
+  const detail = [
+    names.length > 8 ? `${names.slice(0, 8).join('、')} 等 ${names.length} 张` : names.join('、'),
+    deducted.length
+      ? `其中 ${deducted.length} 张已经扣过库存，删除后不会加回来（要加回来请先在图纸里“撤销扣减”或“撤回为待拼”）。`
+      : '库存不受影响。',
+    '原图一起删除，删除后不能恢复。',
+  ].join('\n');
+  if (!(await confirmDialog(`删除选中的 ${chosen.length} 张图纸？`, { ok: `删除 ${chosen.length} 张`, danger: true, detail }))) return;
+  try {
+    for (const p of chosen) await store.deletePattern(p.id);
+    toast(`已删除 ${chosen.length} 张图纸`, 'ok');
+  } catch (e) { toast(e.message, 'error'); }
+  ui.select = null;
+  app.render();
 }
 
 function card(app, p, sel) {
