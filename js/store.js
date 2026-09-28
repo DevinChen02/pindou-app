@@ -30,6 +30,7 @@ export const DEFAULT_SETTINGS = {
   invSort: 'code',                  // 库存排序：code（色号）| asc（数量少→多）| desc（数量多→少）
   buildOrder: 'count',              // 拼的顺序：count（颗数多的先拼）| countAsc | code | list（清单顺序）
   buildShow: 'real',                // 选了颜色时板上：real（没拼的不画，像实物）| fade（三种深浅）
+  buildSpot: false,                 // 高亮当前颜色（板子变暗，其他颜色变暗）
   dewatermark: true,                // 生成拼豆板时去水印（识别时不受水印影响）
   pegboards: [[52, 52], [78, 78], [104, 104]], // 常用拼豆板尺寸（列 × 行）
 };

@@ -36,6 +36,11 @@ export const BUILD_SHOWS = [
 ];
 const orderOf = settings => (BUILD_ORDERS.some(o => o.value === settings.buildOrder) ? settings.buildOrder : 'count');
 const showOf = settings => (settings.buildShow === 'fade' ? 'fade' : 'real');
+const SPOT_OPTS = [
+  { value: 'off', label: '不高亮', desc: '按上面选的显示方式画' },
+  { value: 'on', label: '高亮当前颜色', desc: '板子变暗，正在拼的颜色亮起来、外面一圈白边；其他颜色变暗（已拼好的更暗）。也可以点拼豆板上的“✦ 高亮”随时开关' },
+];
+const spotOf = settings => !!settings.buildSpot;
 /** 颜色按选好的顺序排 */
 export function orderItems(items, order) {
   const list = items.map((it, i) => ({ ...it, i }));
@@ -50,7 +55,15 @@ function viewSheet(app) {
   optionSheet('拼的顺序和显示', [
     { title: '先拼哪个颜色（底部颜色的排列、拼好后自动跳到的下一个）', value: orderOf(app.settings), options: BUILD_ORDERS, onPick: save('buildOrder') },
     { title: '选了一个颜色时，板上怎么显示', value: showOf(app.settings), options: BUILD_SHOWS, onPick: save('buildShow') },
+    { title: '高亮当前颜色（其他颜色变暗）', value: spotOf(app.settings) ? 'on' : 'off', options: SPOT_OPTS, onPick: async v => { app.settings.buildSpot = v === 'on'; await store.saveSettings(app.settings); app.rerender(); } },
   ]);
+}
+
+async function toggleSpot(app) {
+  app.settings.buildSpot = !spotOf(app.settings);
+  await store.saveSettings(app.settings);
+  if (app.settings.buildSpot && !bs.sel) toast('选一个颜色，它会亮起来，其他颜色变暗');
+  app.rerender();
 }
 
 // ---------- 拼豆板生成 ----------
@@ -111,7 +124,7 @@ export async function renderBuild(app) {
   view.classList.add('build-view');
 
   const items = orderItems(merged(p), orderOf(app.settings));
-  const show = showOf(app.settings);
+  const show = showOf(app.settings), spot = spotOf(app.settings);
   const done = new Set(p.build?.done || []);
   if (bs.sel && !items.some(i => i.code === bs.sel)) bs.sel = null;
 
@@ -128,7 +141,8 @@ export async function renderBuild(app) {
     const info = h('div.bd-info', { hidden: true });
     const place = placeOf(board);
     const zoomBar = h('div.bd-zoom',
-      h('button.wide.bd-mirror' + (place.mirror ? '.on' : ''), { 'aria-label': '镜像', 'aria-pressed': String(!!place.mirror), onclick: () => toggleMirror(app, p) }, '⇋ 镜像'),
+      h('button.wide.bd-mirror' + (place.mirror ? '.on' : ''), { 'aria-label': '镜像', 'aria-pressed': String(!!place.mirror), onclick: () => toggleMirror(app, p) }, '⇋', h('span.t', ' 镜像')),
+      h('button.wide.bd-spot' + (spot ? '.on' : ''), { 'aria-label': '高亮当前颜色', 'aria-pressed': String(spot), onclick: () => toggleSpot(app) }, '✦', h('span.t', ' 高亮')),
       h('button', { 'aria-label': '缩小', onclick: () => pz.zoomBy(1 / 1.6) }, '−'),
       h('button.wide', { onclick: () => pz.fit() }, '适合'),
       h('button', { 'aria-label': '放大', onclick: () => pz.zoomBy(1.6) }, '＋'));
@@ -153,7 +167,7 @@ export async function renderBuild(app) {
     const q = Math.max(1, Math.min(2.5, Math.sqrt(9e6 / (W * H))));
     canvas.width = Math.round(W * q); canvas.height = Math.round(H * q);
     canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
-    drawBoard(canvas.getContext('2d'), q, board, { sel: bs.sel, done, place, show });
+    drawBoard(canvas.getContext('2d'), q, board, { sel: bs.sel, done, place, show, spot });
     let infoTimer = null;
     // 点格子会切换选中颜色、整页重画：提示条跟着带过去，别一闪就没了
     const showInfo = (text, until) => {
@@ -222,7 +236,7 @@ export async function renderBuild(app) {
       chip(it.code, { size: 'md' }),
       h('div.grow',
         h('b', `${it.code} · ${fmtNum(it.count)} 颗`),
-        board ? h('div.tiny.muted', (bc === it.count ? '' : `板上 ${bc} / 清单 ${it.count} · `) + (show === 'real' ? '浅色 = 已拼好，没拼的先不画，右边红字 = 每行几颗' : '浅色 = 已拼好，最淡 = 还没拼，右边红字 = 每行几颗')) : null),
+        board ? h('div.tiny.muted', (bc === it.count ? '' : `板上 ${bc} / 清单 ${it.count} · `) + (spot ? `亮的 = 正在拼，暗的 = 已拼好，${show === 'real' ? '没拼的先不画' : '最暗 = 还没拼'}，右边红字 = 每行几颗` : show === 'real' ? '浅色 = 已拼好，没拼的先不画，右边红字 = 每行几颗' : '浅色 = 已拼好，最淡 = 还没拼，右边红字 = 每行几颗')) : null),
       h('button.btn' + (isDone ? '.ghost' : '.ok'), {
         onclick: async () => {
           await store.setColorDone(p.id, it.code, !isDone);
@@ -280,30 +294,33 @@ async function toggleMirror(app, p) {
  * 选了一个颜色时豆子分三种：正在拼（深色）、已拼好（浅色）、还没拼——
  *   show='real'：还没拼的不画（和手上的拼豆板一样）；show='fade'：还没拼的画得最淡。
  * 没选颜色（看全部）时：已拼好的浅色，其余正常。
+ * spot=true（高亮当前颜色）且选了颜色：板子变暗，正在拼的原色 + 白圈，其他颜色变暗（已拼好的比没拼的更暗）。
  */
-export function drawBoard(g, q, board, { sel, done, place = null, show = 'real' }) {
+export function drawBoard(g, q, board, { sel, done, place = null, show = 'real', spot = false }) {
   const P = place || placeOf(board);
   const { cells, codes } = board;
   const rows = P.H, cols = P.W;
   g.setTransform(q, 0, 0, q, 0, 0);
   const { W, H } = boardSize(P);
   g.fillStyle = '#f7f6f3'; g.fillRect(0, 0, W, H);
-  g.fillStyle = '#ffffff'; g.fillRect(M, M, cols * CELL, rows * CELL);
+  const selIdx = sel ? codes.indexOf(sel) + 1 : 0;
+  const dark = spot && selIdx > 0;
+  g.fillStyle = dark ? '#2f2f33' : '#ffffff'; g.fillRect(M, M, cols * CELL, rows * CELL);
   // 细格线
-  g.strokeStyle = '#ebe9e4'; g.lineWidth = 1;
+  g.strokeStyle = dark ? '#3e3e43' : '#ebe9e4'; g.lineWidth = 1;
   g.beginPath();
   for (let c = 0; c <= cols; c++) { g.moveTo(M + c * CELL + 0.5, M); g.lineTo(M + c * CELL + 0.5, M + rows * CELL); }
   for (let r = 0; r <= rows; r++) { g.moveTo(M, M + r * CELL + 0.5); g.lineTo(M + cols * CELL, M + r * CELL + 0.5); }
   g.stroke();
   // 豆子
-  const selIdx = sel ? codes.indexOf(sel) + 1 : 0;
+  const peg = dark ? '#55555b' : '#dedbd4';
   const colorOf = codes.map(c => rgbFor(c));
   const rad = CELL * 0.43, hole = CELL * 0.13;
   const rowCount = new Array(rows).fill(0);
   // 图纸网格以外的拼豆板位置：浅灰底（摆放时看得出图纸占哪一块）
   const gx0 = P.ox, gy0 = P.oy, gx1 = P.ox + board.cols, gy1 = P.oy + board.rows;
   if (gx0 > 0 || gy0 > 0 || gx1 < cols || gy1 < rows) {
-    g.fillStyle = '#f1efea';
+    g.fillStyle = dark ? '#28282b' : '#f1efea';
     for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
       if (c >= gx0 && c < gx1 && r >= gy0 && r < gy1) continue;
       const x = P.mirror ? cols - 1 - c : c;
@@ -317,7 +334,7 @@ export function drawBoard(g, q, board, { sel, done, place = null, show = 'real' 
       const x = P.mirror ? cols - 1 - c : c;
       const cx = M + x * CELL + CELL / 2, cy = M + r * CELL + CELL / 2;
       if (!v) {
-        g.fillStyle = '#dedbd4';
+        g.fillStyle = peg;
         g.beginPath(); g.arc(cx, cy, 1.4, 0, Math.PI * 2); g.fill();
         continue;
       }
@@ -326,11 +343,24 @@ export function drawBoard(g, q, board, { sel, done, place = null, show = 'real' 
       // 这颗豆子现在是哪种：cur 正在拼 / done 已拼好 / todo 还没拼
       const stage = v === selIdx ? 'cur' : done.has(code) ? 'done' : selIdx ? 'todo' : 'cur';
       if (stage === 'todo' && show === 'real') {
-        g.fillStyle = '#dedbd4';
+        g.fillStyle = peg;
         g.beginPath(); g.arc(cx, cy, 1.4, 0, Math.PI * 2); g.fill();
         continue;
       }
       let [R, G, B] = colorOf[v - 1] || [180, 180, 180];
+      if (dark) {
+        // 高亮：正在拼的原色 + 白圈；其他颜色压暗（已拼好的 30%，没拼的 18%），在暗底上还认得出颜色
+        if (stage !== 'cur') { const k = stage === 'done' ? 0.3 : 0.18; R = Math.round(R * k + 30); G = Math.round(G * k + 30); B = Math.round(B * k + 33); }
+        g.fillStyle = `rgb(${R},${G},${B})`;
+        g.beginPath(); g.arc(cx, cy, rad, 0, Math.PI * 2); g.fill();
+        if (stage === 'cur') {
+          g.lineWidth = 2; g.strokeStyle = '#ffffff'; g.stroke();
+          const lum = 0.299 * R + 0.587 * G + 0.114 * B;
+          g.fillStyle = lum > 200 ? 'rgba(0,0,0,.18)' : 'rgba(255,255,255,.55)';
+          g.beginPath(); g.arc(cx, cy, hole, 0, Math.PI * 2); g.fill();
+        }
+        continue;
+      }
       if (stage === 'done') {
         // 浅色：往白色掺 60%，描一圈淡边——白色、米色的豆子也看得出来
         R = Math.round(R + (255 - R) * 0.6); G = Math.round(G + (255 - G) * 0.6); B = Math.round(B + (255 - B) * 0.6);
@@ -573,6 +603,30 @@ async function reviewFlow(app, p) {
   buildSteps();
   let at = 0;
 
+  // 上一题：每答一题（包括跳过）之前记下当时的状态，点“上一题”就原样退回去（防手滑）
+  let hist = [];
+  const snap = (view = { type: 'q' }) => hist.push({ at, view, locks: new Map(locks), changed: new Set(changed) });
+  const back = () => {
+    const h0 = hist.pop();
+    if (!h0) return;
+    at = h0.at;
+    locks.clear(); for (const [i, k] of h0.locks) locks.set(i, k);
+    changed.clear(); for (const i of h0.changed) changed.add(i);
+    if (h0.view.type === 'hunt') huntPage(h0.view.r, h0.view.picked); else render();
+  };
+  const backBtn = () => h('button.btn.ghost.rv-back', { disabled: !hist.length, onclick: back }, '← 上一题');
+
+  // “其他颜色”：这张图纸清单里的所有颜色 + 空
+  const otherSheet = (title, current) => new Promise(resolve => {
+    let done = false;
+    const pick = v => { done = true; sh.close(); resolve(v); };
+    const sh = sheet([
+      h('p.small.muted', { style: { margin: '0 2px 10px' } }, '选这一格真正的颜色。清单里没有的颜色，要先在图纸详情“修改颜色和数量”里加上。'),
+      h('div.code-grid.rv-other', refs.map(r => h('button.code-cell' + (r.code === current ? '.on' : ''), { 'data-code': r.code, onclick: () => pick(r.code) }, chip(r.code, { size: 'sm' }))),
+        h('button.code-cell' + (current === '' ? '.on' : ''), { 'data-code': '', onclick: () => pick('') }, h('span.chip.sm.empty', '空'))),
+    ], { title, onClose: () => { if (!done) resolve(null); } });
+  });
+
   const codeBtn = (code, on, onclick) => h('button.code-cell' + (on ? '.on' : ''), { onclick }, code ? chip(code, { size: 'sm' }) : h('span.chip.sm.empty', '空'));
   const finish = async () => {
     clear(body).append(h('div.bd-wait', h('div.spinner'), h('p.small.muted', '按你确认的格子重新计算整板…')));
@@ -608,7 +662,7 @@ async function reviewFlow(app, p) {
       for (const [i, k] of got) { locks.set(i, k); changed.add(i); }
       const fixed = report.filter(x => x.verdict !== 'ok' && x.verdict !== 'unsure');
       toast(fixed.length ? `识字发现 ${fixed.map(x => `${x.code}→${x.verdict}`).join('、')}，已锁定 ${got.size} 格` : `识字核对了 ${report.length} 种颜色${got.size ? `，锁定 ${got.size} 格` : ''}`, 'ok');
-      if (got.size) { await run(); rv = boardReview(res, { cols, locks }); buildSteps(); at = 0; }
+      if (got.size) { await run(); rv = boardReview(res, { cols, locks }); buildSteps(); at = 0; hist = []; }
     } catch (e) {
       toast('识字模型加载失败：' + (e.message || e), 'error');
     }
@@ -617,18 +671,18 @@ async function reviewFlow(app, p) {
   };
 
   // 身份认错时：在相近色号里挑“字最不像”的一批格子，让用户点出真正的那种
-  const huntPage = r => {
-    const picked = new Set();
-    const cells = r.hunt.filter(i => !locks.has(i));
+  const huntPage = (r, pre = []) => {
+    const picked = new Set(pre);
+    const cells = r.hunt.filter(i => !locks.has(i) || pre.includes(i));
     clear(body).append(
       h('p', h('b', `请点出所有写着 ${r.code} 的格子`)),
       h('p.small.muted', '这些格子颜色和它很像；点一下选中，再点取消。一个都没有就直接“下一步”。'),
       h('div.rv-grid', cells.map(i => {
-        const b = h('button.rv-pick', { onclick: () => { if (picked.has(i)) picked.delete(i); else picked.add(i); b.classList.toggle('on'); } }, cellCrop(pix.canvas, geo, cols, i, 92));
+        const b = h('button.rv-pick' + (picked.has(i) ? '.on' : ''), { onclick: () => { if (picked.has(i)) picked.delete(i); else picked.add(i); b.classList.toggle('on'); } }, cellCrop(pix.canvas, geo, cols, i, 92));
         return b;
       })),
-      h('div.row.gap.end.rv-foot',
-        h('button.btn.primary', { onclick: () => { for (const i of picked) setLock(i, r.code); at++; render(); } }, '下一步')));
+      h('div.row.between.rv-foot', backBtn(),
+        h('button.btn.primary', { onclick: () => { snap({ type: 'hunt', r, picked: [...picked] }); for (const i of picked) setLock(i, r.code); at++; render(); } }, '下一步')));
   };
 
   function render() {
@@ -645,42 +699,47 @@ async function reviewFlow(app, p) {
       body.append(h('div.rv-done',
         h('p', h('b', changed.size ? `确认了 ${changed.size} 格` : '没有要确认的了')),
         h('p.small.muted', '点“重新计算”：确认过的格子会锁定，整板按它们重新认一遍（颜色认反了的会一起纠正）。'),
-        h('div.row.gap.end', h('button.btn.ghost', { onclick: () => s.close() }, '取消'),
+        h('div.row.gap.end', hist.length ? backBtn() : null, h('button.btn.ghost', { onclick: () => s.close() }, '取消'),
           h('button.btn.primary', { onclick: finish }, changed.size ? '重新计算' : '完成'))));
       return;
     }
     const st = steps[at];
+    const foot = () => h('div.row.between.rv-foot', backBtn(),
+      h('div.row.gap', h('button.btn.ghost', { onclick: () => { snap(); at++; render(); } }, '跳过'), h('button.btn.ghost', { onclick: () => { snap(); at = steps.length; render(); } }, '结束核对')));
     if (st.type === 'risk') {
       const r = st.r, i = r.probe[0];
       const why = r.reason === 'close' ? `${r.code} 和 ${r.partners.join('、')} 颜色很接近` : `图上 ${r.code} 的颜色和色卡差得比较多`;
+      // 不是 r.code：锁成用户选的颜色；r.code 真正的格子多半混在相近色号里，让用户找出来
+      const notIt = c => {
+        if (c === r.code) { snap(); setLock(i, r.code); at++; render(); return; }
+        snap(); setLock(i, c);
+        if (r.hunt.length) huntPage(r); else { at++; render(); }
+      };
       body.append(
         h('div.rv-card', cellCrop(pix.canvas, geo, cols, i),
           h('div.grow', h('div.small.muted', why), h('p', h('b', `红框里这一格是 ${r.code} 吗？`)), h('div.tiny.muted', '放大看格子里印的色号'))),
         h('div.rv-opts',
-          h('button.btn.ok', { onclick: () => { setLock(i, r.code); at++; render(); } }, `✓ 是 ${r.code}`),
+          h('button.btn.ok', { onclick: () => { snap(); setLock(i, r.code); at++; render(); } }, `✓ 是 ${r.code}`),
           h('div.small.muted', { style: { marginTop: '10px' } }, '不是的话，它是：'),
-          h('div.code-grid', [...new Set([...r.partners, ...refs.map(x => x.code)])].filter(c => c !== r.code).slice(0, 12).map(c => codeBtn(c, false, () => {
-            setLock(i, c);
-            // 这一格不是 r.code：r.code 真正的格子多半混在相近色号里，让用户找出来
-            if (r.hunt.length) huntPage(r); else { at++; render(); }
-          })), codeBtn('', false, () => { setLock(i, ''); if (r.hunt.length) huntPage(r); else { at++; render(); } }))),
-        h('div.row.gap.end.rv-foot', h('button.btn.ghost', { onclick: () => { at++; render(); } }, '跳过'), h('button.btn.ghost', { onclick: () => { at = steps.length; render(); } }, '结束核对')));
+          h('div.code-grid', [...new Set([...r.partners, ...refs.map(x => x.code)])].filter(c => c !== r.code).slice(0, 11).map(c => codeBtn(c, false, () => notIt(c))),
+            codeBtn('', false, () => notIt('')),
+            h('button.code-cell.rv-more', { onclick: async () => { const c = await otherSheet('这一格是哪个颜色？', null); if (c != null) notIt(c); } }, h('span.chip.sm.empty', '其他颜色')))),
+        foot());
     } else {
       const u = st.u;
       const cur = res.cells[u.i] ? res.codes[res.cells[u.i] - 1] : '';
       body.append(
         h('div.rv-card', cellCrop(pix.canvas, geo, cols, u.i),
           h('div.grow', h('div.small.muted', `第 ${Math.floor(u.i / cols) + 1} 行 · 第 ${u.i % cols + 1} 列`), h('p', h('b', '红框里这一格是？')), h('div.tiny.muted', `现在认成 ${cur || '空'}`))),
-        h('div.code-grid.rv-opts', u.cand.map(c => codeBtn(c, c === cur, () => { setLock(u.i, c); at++; render(); })),
-          h('button.code-cell', {
+        h('div.code-grid.rv-opts', u.cand.map(c => codeBtn(c, c === cur, () => { snap(); setLock(u.i, c); at++; render(); })),
+          h('button.code-cell.rv-more', {
             onclick: async () => {
-              const c = await pickCode({ current: cur, title: '这一格是哪个色号？' });
-              if (!c) return;
-              if (!refs.some(r => r.code === c)) { toast(`${c} 不在这张图纸的清单里`, 'error'); return; }
-              setLock(u.i, c); at++; render();
+              const c = await otherSheet('这一格是哪个颜色？', cur);
+              if (c == null) return;
+              snap(); setLock(u.i, c); at++; render();
             },
-          }, h('span.chip.sm.empty', '其他'))),
-        h('div.row.gap.end.rv-foot', h('button.btn.ghost', { onclick: () => { at++; render(); } }, '跳过'), h('button.btn.ghost', { onclick: () => { at = steps.length; render(); } }, '结束核对')));
+          }, h('span.chip.sm.empty', '其他颜色'))),
+        foot());
     }
   }
   render();

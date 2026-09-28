@@ -672,3 +672,10 @@ main.build-view { position: fixed; left: 0; right: 0; bottom: 0; top: calc(var(-
 .sticky-actions.sel-actions { flex-direction: row; }
 .sel-actions .sel-del { flex-shrink: 0; background: var(--bad-soft, rgba(229, 72, 77, .12)); border-color: transparent; color: var(--bad); padding: 0 16px; }
 .sel-actions .sel-del:disabled { opacity: .45; }
+/* 核对拼豆板：“其他颜色”占两格宽，不折行；上一题 */
+.code-cell.rv-more { grid-column: span 2; }
+.code-cell.rv-more .chip { white-space: nowrap; }
+.rv-back:disabled { opacity: .4; }
+/* 高亮当前颜色的开关（和镜像并排）；窄屏只显示图标 */
+.bd-zoom .bd-spot.on { background: var(--accent); }
+@media (max-width: 370px) { .bd-zoom .t { display: none; } }
