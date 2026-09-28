@@ -1,6 +1,7 @@
 // 全屏看图：双指缩放、单指拖动、双击放大；可在“清单 / 整张图”之间切换，多张图左右翻。
 import { h, toast } from './ui.js';
 import { getImage } from './store.js';
+import { createPanZoom } from './panzoom.js';
 
 /** 清单参考图上的框 → 整张图上的框（fullMap 见 extract/index.js 的 saveFullImage） */
 export function toFullBox(b, img) {
@@ -88,48 +89,22 @@ export function openImageViewer(entries, { index = 0, view = 'full', focus = tru
     stage,
     h('div.pz-bottom', seg, tools));
 
-  // ---- 缩放状态：layer 以左上角为原点 translate + scale ----
-  const st = { s: 1, tx: 0, ty: 0, w: 1, h: 1, fit: 1, min: 0.1, max: 4, ready: false };
-  const size = () => ({ sw: stage.clientWidth || window.innerWidth, sh: stage.clientHeight || window.innerHeight });
-  function apply() {
-    layer.style.transform = `translate(${st.tx}px, ${st.ty}px) scale(${st.s})`;
-    layer.style.setProperty('--bw', (3 / st.s) + 'px'); // 框线在屏幕上始终约 3 点粗
-    pct.textContent = st.ready ? Math.round(st.s / st.fit * 100) + '%' : '';
-  }
-  function clampT() {
-    const { sw, sh } = size();
-    const iw = st.w * st.s, ih = st.h * st.s;
-    st.tx = iw <= sw ? (sw - iw) / 2 : clamp(st.tx, sw - iw, 0);
-    st.ty = ih <= sh ? (sh - ih) / 2 : clamp(st.ty, sh - ih, 0);
-  }
-  function zoomAt(ns, cx, cy) {
-    ns = clamp(ns, st.min, st.max);
-    const ix = (cx - st.tx) / st.s, iy = (cy - st.ty) / st.s;
-    st.s = ns; st.tx = cx - ix * ns; st.ty = cy - iy * ns;
-    clampT(); apply();
-  }
-  function zoomCenter(f) { const { sw, sh } = size(); zoomAt(st.s * f, sw / 2, sh / 2); }
-  function setLimits() {
-    const { sw, sh } = size();
-    st.fit = Math.min(sw / st.w, sh / st.h);
-    st.min = Math.min(st.fit, 1);
-    // 最大：原图 1 像素放到 4 个屏幕点，或“适合”的 10 倍
-    st.max = Math.max(st.fit * 10, 4);
-  }
-  function fitAll() { setLimits(); st.s = st.fit; clampT(); apply(); }
+  // ---- 缩放/拖动交给通用引擎 ----
+  const pz = createPanZoom(stage, layer, {
+    onChange: st => {
+      layer.style.setProperty('--bw', (3 / st.s) + 'px'); // 框线在屏幕上始终约 3 点粗
+      pct.textContent = st.ready ? Math.round(st.s / st.fit * 100) + '%' : '';
+    },
+    onTap: onTap ? c => onTap({ x: c.x, y: c.y, entry: entries[ei], view: curView(), close }) : null,
+  });
+  const fitAll = () => pz.fit();
+  const zoomCenter = f => pz.zoomBy(f);
   function curView() { return entries[ei].views.find(v => v.key === vkey) || entries[ei].views[0]; }
   function focusBox() {
     const v = curView();
     const b = union(v.box, v.box2);
     if (!b) return fitAll();
-    const { sw, sh } = size();
-    const bw = Math.max(b.x1 - b.x0, 8), bh = Math.max(b.y1 - b.y0, 8);
-    // 框占屏幕宽度一半左右，周围留些上下文；最多放大到“适合”的 6 倍
-    const ns = clamp(Math.min(sw * 0.5 / bw, sh * 0.3 / bh, st.fit * 6), st.fit, st.max);
-    st.s = ns;
-    st.tx = sw / 2 - (b.x0 + b.x1) / 2 * ns;
-    st.ty = sh / 2 - (b.y0 + b.y1) / 2 * ns;
-    clampT(); apply();
+    pz.focusRect(b);
   }
   const place = (el, b) => {
     el.hidden = !b;
@@ -152,7 +127,7 @@ export function openImageViewer(entries, { index = 0, view = 'full', focus = tru
     }, x.label)) : []));
     seg.hidden = e.views.length < 2;
     boxBtn.hidden = !(v.box || v.box2);
-    st.ready = false;
+    pz.state.ready = false;
     layer.style.visibility = 'hidden';
     msg.hidden = false;
     msg.textContent = v.load ? '正在载入原图…' : '';
@@ -164,21 +139,19 @@ export function openImageViewer(entries, { index = 0, view = 'full', focus = tru
     if (!src) { msg.textContent = '原图已经不在了（可能被清理掉了）'; return; }
     imgEl.onload = () => {
       if (my !== token) return;
-      st.w = v.w || imgEl.naturalWidth;
-      st.h = v.h || imgEl.naturalHeight;
-      imgEl.style.width = st.w + 'px';
-      imgEl.style.height = st.h + 'px';
+      const w = v.w || imgEl.naturalWidth, hh = v.h || imgEl.naturalHeight;
+      imgEl.style.width = w + 'px';
+      imgEl.style.height = hh + 'px';
       place(hl, v.box); place(hl2, v.box2);
       marksEl.replaceChildren(...(v.marks || []).map(m => {
         const el = h('div.pz-mark.' + (m.tone || 'ok'), m.label ? h('span', m.label) : null);
         place(el, m);
         return el;
       }));
-      setLimits();
       msg.hidden = true;
       layer.style.visibility = '';
-      st.ready = true;
-      if (doFocus && (v.box || v.box2)) focusBox(); else fitAll();
+      pz.setContent(w, hh);
+      if (doFocus && (v.box || v.box2)) focusBox();
     };
     imgEl.onerror = () => { if (my === token) msg.textContent = '图片打不开'; };
     imgEl.src = src;
@@ -189,73 +162,7 @@ export function openImageViewer(entries, { index = 0, view = 'full', focus = tru
     show(focus);
   }
 
-  // ---- 手势：Pointer Events（iPhone Safari 13+ 支持） ----
-  const pts = new Map();
-  let g = null, moved = false, multi = false, lastTap = { t: 0, x: 0, y: 0 }, tapTimer = null;
-  const pos = e => { const r = stage.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
-  const mid = p => p.length > 1 ? { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 } : p[0];
-  const dist = p => Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
-  function begin() {
-    const p = [...pts.values()];
-    if (!p.length) { g = null; layer.style.willChange = ''; return; }
-    layer.style.willChange = 'transform';
-    const m = mid(p);
-    g = { s0: st.s, d0: p.length > 1 ? dist(p) : 0, mx: m.x, my: m.y, tx0: st.tx, ty0: st.ty };
-  }
-  stage.addEventListener('pointerdown', e => {
-    if (!st.ready) return;
-    try { stage.setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
-    if (!pts.size) { moved = false; multi = false; }
-    pts.set(e.pointerId, pos(e));
-    if (pts.size > 1) multi = true;
-    hint.classList.add('gone');
-    begin();
-  });
-  stage.addEventListener('pointermove', e => {
-    if (!pts.has(e.pointerId) || !g) return;
-    pts.set(e.pointerId, pos(e));
-    const p = [...pts.values()];
-    const m = mid(p);
-    let ns = g.s0;
-    if (p.length > 1 && g.d0 > 0) ns = clamp(g.s0 * dist(p) / g.d0, st.min, st.max);
-    const ix = (g.mx - g.tx0) / g.s0, iy = (g.my - g.ty0) / g.s0;
-    st.s = ns; st.tx = m.x - ix * ns; st.ty = m.y - iy * ns;
-    if (p.length > 1 || Math.hypot(m.x - g.mx, m.y - g.my) > 8) moved = true;
-    clampT(); apply();
-  });
-  const end = e => {
-    if (!pts.has(e.pointerId)) return;
-    const p = pts.get(e.pointerId);
-    pts.delete(e.pointerId);
-    begin();
-    if (pts.size || moved || multi) return;
-    // 单击：检查是不是双击
-    const now = Date.now();
-    if (now - lastTap.t < 320 && Math.hypot(p.x - lastTap.x, p.y - lastTap.y) < 40) {
-      lastTap.t = 0;
-      clearTimeout(tapTimer);
-      if (st.s > st.fit * 1.3) fitAll(); else zoomAt(st.fit * 3, p.x, p.y);
-    } else {
-      lastTap = { t: now, x: p.x, y: p.y };
-      if (onTap) {
-        // 等一下看是不是双击；不是才算单击
-        const ix = (p.x - st.tx) / st.s, iy = (p.y - st.ty) / st.s;
-        clearTimeout(tapTimer);
-        tapTimer = setTimeout(() => onTap({ x: ix, y: iy, entry: entries[ei], view: curView(), close }), 300);
-      }
-    }
-  };
-  stage.addEventListener('pointerup', end);
-  stage.addEventListener('pointercancel', end);
-  stage.addEventListener('wheel', e => {
-    e.preventDefault();
-    const p = pos(e);
-    zoomAt(st.s * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025)), p.x, p.y);
-  }, { passive: false });
-  // iPhone Safari 的系统级双指缩放
-  const stopGesture = e => e.preventDefault();
-  root.addEventListener('gesturestart', stopGesture);
-  root.addEventListener('gesturechange', stopGesture);
+  stage.addEventListener('pz-touch', () => hint.classList.add('gone'));
 
   const onKey = e => {
     if (e.key === 'Escape') close();
@@ -264,7 +171,7 @@ export function openImageViewer(entries, { index = 0, view = 'full', focus = tru
     else if (e.key === '+' || e.key === '=') zoomCenter(1.6);
     else if (e.key === '-') zoomCenter(1 / 1.6);
   };
-  const onResize = () => { if (!st.ready) return; const r = st.s / st.fit; setLimits(); st.s = clamp(st.fit * r, st.min, st.max); clampT(); apply(); };
+  const onResize = () => pz.resize();
   window.addEventListener('keydown', onKey);
   window.addEventListener('resize', onResize);
   setTimeout(() => hint.classList.add('gone'), 2600);
@@ -274,7 +181,7 @@ export function openImageViewer(entries, { index = 0, view = 'full', focus = tru
   document.body.append(root);
   function close() {
     token++;
-    clearTimeout(tapTimer);
+    pz.destroy();
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('resize', onResize);
     if (!hadNoScroll) document.body.classList.remove('noscroll');

@@ -4,7 +4,7 @@ import * as store from '../store.js';
 import { loadImageFile, contentBounds, cropCanvas, guessLegendRect } from '../image.js';
 import { extractImage, extractText, referenceImage, statedFromImages, newId } from '../extract/index.js';
 import { renderVerify } from './verify.js';
-import { renderPreview, renderDone } from './preview.js';
+import { renderPreview } from './preview.js';
 
 const METHOD_TIPS = {
   vlm: '把截图发给云端大模型读取清单。版式再怪也能读，需联网、按次计费。',
@@ -16,7 +16,6 @@ export async function renderRecognize(app) {
   const r = app.rec;
   if (r.step === 'verify') return renderVerify(app);
   if (r.step === 'preview') return renderPreview(app);
-  if (r.step === 'done') return renderDone(app);
   if (r.step === 'crop') return renderCrop(app);
   if (r.step === 'running') return renderRunning(app);
   return renderPick(app);
@@ -25,7 +24,8 @@ export async function renderRecognize(app) {
 // ---------- 第 1 步：选方法、选图 ----------
 
 async function renderPick(app) {
-  app.setTitle('识别图纸');
+  app.setTitle('添加图纸');
+  app.setBack(() => { app.pat.page = 'list'; app.render(); });
   const s = app.settings;
   const view = clear(app.view);
   const enabled = store.enabledMethods(s);

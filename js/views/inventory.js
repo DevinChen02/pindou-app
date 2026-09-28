@@ -4,10 +4,19 @@ import { PALETTE, SERIES, hexOf, normalizeCode, seriesLabel } from '../palette.j
 import { parseLegendText } from '../extract/text.js';
 import * as store from '../store.js';
 
-const ui = { filter: 'owned', series: 'all', q: '' };
+const ui = { filter: 'owned', series: 'all', q: '', tab: 'stock' };
 
 export async function renderInventory(app) {
   app.setTitle('库存');
+  if (app.fresh) ui.tab = 'stock';
+  const segs = h('div.seg', { style: { margin: '6px 0 4px' } },
+    h('button' + (ui.tab === 'stock' ? '.on' : ''), { onclick: () => { ui.tab = 'stock'; app.rerender(); } }, '库存'),
+    h('button' + (ui.tab === 'tx' ? '.on' : ''), { onclick: () => { ui.tab = 'tx'; app.rerender(); } }, '流水'));
+  if (ui.tab === 'tx') {
+    const view = clear(app.view);
+    view.append(segs);
+    return transactions(app, view);
+  }
   const settings = app.settings;
   const inv = await store.getInventory();
   const lows = store.lowStockList(inv, settings);
@@ -50,7 +59,7 @@ export async function renderInventory(app) {
     h('span', { style: { width: '8px', flexShrink: 0 } }),
     ['all', ...SERIES].map(sr => h('button' + (ui.series === sr ? '.on' : ''), { onclick: () => { ui.series = sr; app.rerender(); } }, sr === 'all' ? '全系列' : seriesLabel(sr))));
 
-  view.append(h('div.inv-tools', search, filters));
+  view.append(segs, h('div.inv-tools', search, filters));
   if (lows.length && ui.filter !== 'low') {
     view.append(h('div.banner.warn', { style: { cursor: 'pointer' }, onclick: () => { ui.filter = 'low'; app.rerender(); } },
       h('span.ico', '🛒'), h('div.grow', h('b', `${lows.length} 种颜色低于补货线`), h('div.small', lows.slice(0, 8).map(x => x.code).join('、') + (lows.length > 8 ? '…' : ''))), h('span', '›')));
@@ -146,4 +155,28 @@ function batchSheet(app) {
       },
     }, '设置')),
   ], { title: '批量录入库存', tall: true });
+}
+
+// ---------- 库存流水 ----------
+
+async function transactions(app, view) {
+  const list = await store.listTransactions();
+  if (!list.length) {
+    view.append(h('div.empty', h('div.big-ico', '📒'), h('p', '还没有库存变动记录。')));
+    return;
+  }
+  const patterns = new Map((await store.listPatterns()).map(p => [p.id, p]));
+  const box = h('div.list', { style: { marginTop: '10px' } });
+  for (const t of list.slice(0, 300)) {
+    const sum = t.deltas.reduce((a, d) => a + d.delta, 0);
+    const pname = t.patternId != null ? patterns.get(t.patternId)?.name : '';
+    const deltas = h('div.tx-deltas', { hidden: true }, t.deltas.map(d => h('span', `${d.code} ${d.delta > 0 ? '+' : ''}${d.delta} → ${d.after}`)));
+    box.append(h('div.li.click', { style: { flexWrap: 'wrap' }, onclick: () => { deltas.hidden = !deltas.hidden; } },
+      h('div.grow',
+        h('div', h('b', store.TX_TYPES[t.type] || t.type), pname ? ` · ${pname}` : '', t.note ? ` · ${t.note}` : '', t.undone ? h('span.tag', { style: { marginLeft: '6px' } }, '已撤销') : null),
+        h('div.tiny.muted', `${fmtTime(t.time)} · ${t.deltas.length} 色`)),
+      h('b.mono', { style: { color: sum < 0 ? 'var(--bad)' : 'var(--ok)' } }, (sum > 0 ? '+' : '') + fmtNum(sum)),
+      h('div', { style: { flexBasis: '100%' } }, deltas)));
+  }
+  view.append(box, h('p.small.muted.center', '点一条记录可以看每个颜色的变化。拼豆扣减可以在图纸详情里撤销。'));
 }

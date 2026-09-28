@@ -79,6 +79,19 @@ export function confirmDialog(message, { ok = '确定', cancel = '取消', dange
   });
 }
 
+/** 输入一行文字的小弹层，返回输入的内容（取消返回 null） */
+export function inputSheet(title, value = '', { placeholder = '', ok = '保存' } = {}) {
+  return new Promise(resolve => {
+    const input = h('input.input', { value, placeholder, maxlength: 60 });
+    const done = () => s.close(input.value.trim() || null);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') done(); });
+    const s = sheet([input, h('div.row.gap.end', { style: { marginTop: '12px' } },
+      h('button.btn.ghost', { onclick: () => s.close(null) }, '取消'), h('button.btn.primary', { onclick: done }, ok))],
+    { title, onClose: v => resolve(typeof v === 'string' ? v : null) });
+    setTimeout(() => { input.focus(); input.select(); }, 250);
+  });
+}
+
 /** 色号色块 */
 export function chip(code, { size = 'md', label = code, rgb } = {}) {
   const bg = rgb ? `rgb(${rgb.join(',')})` : isCode(code) ? hexOf(code) : '#d9d9de';

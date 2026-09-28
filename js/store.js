@@ -115,7 +115,7 @@ export function lowStockList(inv, settings, onlyOwned = false) {
  * changes: [{ code, delta }]（加减）或 [{ code, set }]（设为）
  * 如果 forbidNegative 且有颜色会变成负数，整笔操作取消并抛错（err.shortages 列出缺口）。
  */
-export async function applyChanges(changesIn, { type, note = '', patternId = null, forbidNegative = false, extra = {} } = {}) {
+export async function applyChanges(changesIn, { type, note = '', patternId = null, forbidNegative = false, clampZero = false, patternPatch = null, extra = {} } = {}) {
   const time = Date.now();
   // 同一色号出现多次时合并
   const byCode = new Map();
@@ -150,10 +150,14 @@ export async function applyChanges(changesIn, { type, note = '', patternId = nul
       const r = t.objectStore('transactions').add(txRec);
       r.onsuccess = () => {
         done(r.result);
-        if (patternId != null && type === 'consume') {
+        if (patternId != null && (patternPatch || type === 'consume')) {
           const ps = t.objectStore('patterns');
           const g = ps.get(patternId);
-          g.onsuccess = () => { if (g.result) ps.put({ ...g.result, status: 'done', txId: r.result, doneAt: time }); };
+          g.onsuccess = () => {
+            if (!g.result) return;
+            const txDeltas = deltas.map(d => ({ code: d.code, delta: d.after - d.before }));
+            ps.put(patternPatch ? patternPatch(g.result, r.result, time, txDeltas) : { ...g.result, status: 'done', txId: r.result, doneAt: time });
+          };
         }
       };
     };
@@ -163,7 +167,8 @@ export async function applyChanges(changesIn, { type, note = '', patternId = nul
       g.onsuccess = () => {
         const rec = g.result || { code: ch.code, stock: 0, threshold: null };
         const before = rec.stock ?? 0;
-        const after = ch.set != null ? Math.max(0, Math.round(ch.set)) : before + Math.round(ch.delta);
+        let after = ch.set != null ? Math.max(0, Math.round(ch.set)) : before + Math.round(ch.delta);
+        if (clampZero && after < 0 && before >= 0) after = 0; // 库存记录比实际少：扣到 0 为止
         if (after < 0) shortages.push({ code: ch.code, before, after });
         deltas.push({ code: ch.code, rec, before, after });
         if (--pending === 0) finish();
@@ -190,7 +195,7 @@ export async function undoTransaction(txId) {
   await db.put('transactions', { ...tx, undone: true, undoneBy: id });
   if (tx.patternId != null) {
     const p = await db.get('patterns', tx.patternId);
-    if (p) await db.put('patterns', { ...p, status: 'pending', txId: null });
+    if (p) await db.put('patterns', patternAfterUndo(p, tx));
   }
   return id;
 }
@@ -213,6 +218,116 @@ export async function listTransactions() {
 }
 
 // ---------- 图纸 ----------
+// 图纸：{ id, name, tags:[], status:'pending'|'building'|'done', items:[{code,count}], images, imageIds, thumbs,
+//         board?:{ rows, cols, codes, cells, stats, ... }  拼豆板（数字化的网格）
+//         build?:{ startedAt, done:[色号], deducted:{色号:已扣颗数}, txIds:[], finishedAt, partial } 拼豆进度 }
+
+/** 撤销某笔扣减后，图纸回到什么状态 */
+function patternAfterUndo(p, tx) {
+  const b = p.build;
+  if (b && (b.txIds || []).includes(tx.id)) {
+    const deducted = { ...(b.deducted || {}) };
+    for (const d of tx.deltas) deducted[d.code] = Math.max(0, (deducted[d.code] || 0) + d.delta); // delta 是负数
+    const txIds = b.txIds.filter(x => x !== tx.id);
+    // 打勾保留（多半是误点了“拼好”想撤回），只是库存加回来、图纸回到“拼豆中”
+    return { ...p, status: 'building', txId: null, doneAt: null, build: { ...b, deducted, txIds, finishedAt: null, partial: false } };
+  }
+  return { ...p, status: p.build ? 'building' : 'pending', txId: null, doneAt: null };
+}
+
+/** 这幅图每种颜色还要扣多少（需要 − 已扣） */
+export function remainingNeed(p, settings) {
+  const ded = p.build?.deducted || {};
+  const merged = new Map();
+  for (const it of p.items) merged.set(it.code, (merged.get(it.code) || 0) + it.count);
+  return [...merged].map(([code, count]) => ({ code, count, need: needOf(count, settings), deducted: ded[code] || 0 }))
+    .map(r => ({ ...r, left: Math.max(0, r.need - r.deducted) }));
+}
+
+export async function patchPattern(id, patch) {
+  const p = await db.get('patterns', id);
+  if (!p) throw new Error('图纸不存在了');
+  const np = typeof patch === 'function' ? patch(p) : { ...p, ...patch };
+  await db.put('patterns', np);
+  return np;
+}
+
+/** 所有分类（按使用次数、名字排序） */
+export async function allTags() {
+  const n = new Map();
+  for (const p of await db.getAll('patterns')) for (const t of p.tags || []) n.set(t, (n.get(t) || 0) + 1);
+  const extra = (await db.get('kv', 'tags'))?.value || [];
+  for (const t of extra) if (!n.has(t)) n.set(t, 0);
+  return [...n].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh')).map(([t, c]) => ({ tag: t, count: c }));
+}
+/** 新建一个分类（还没有图纸用它时也要记住） */
+export async function addTag(tag) {
+  const cur = (await db.get('kv', 'tags'))?.value || [];
+  if (!cur.includes(tag)) await db.put('kv', { key: 'tags', value: [...cur, tag] });
+}
+export async function renameTag(oldTag, newTag) {
+  newTag = newTag.trim();
+  if (!newTag || newTag === oldTag) return;
+  for (const p of await db.getAll('patterns')) {
+    if ((p.tags || []).includes(oldTag)) await db.put('patterns', { ...p, tags: [...new Set(p.tags.map(t => (t === oldTag ? newTag : t)))] });
+  }
+  const cur = (await db.get('kv', 'tags'))?.value || [];
+  await db.put('kv', { key: 'tags', value: [...new Set(cur.map(t => (t === oldTag ? newTag : t)))] });
+}
+export async function deleteTag(tag) {
+  for (const p of await db.getAll('patterns')) {
+    if ((p.tags || []).includes(tag)) await db.put('patterns', { ...p, tags: p.tags.filter(t => t !== tag) });
+  }
+  const cur = (await db.get('kv', 'tags'))?.value || [];
+  await db.put('kv', { key: 'tags', value: cur.filter(t => t !== tag) });
+}
+
+/** 复制一份图纸（再拼一次）：颜色、原图、拼豆板、分类都带上，进度清空 */
+export async function duplicatePattern(id, name) {
+  const p = await db.get('patterns', id);
+  if (!p) throw new Error('图纸不存在了');
+  const { id: _, txId, doneAt, build, ...rest } = p;
+  return savePattern({ ...rest, name: name || `${p.name}（再拼）`, status: 'pending', createdAt: Date.now() });
+}
+
+// ---------- 拼豆 ----------
+
+export async function startBuild(id) {
+  return patchPattern(id, p => ({
+    ...p, status: p.status === 'done' ? p.status : 'building',
+    build: p.build || { startedAt: Date.now(), done: [], deducted: {}, txIds: [] },
+  }));
+}
+
+export async function setColorDone(id, code, done) {
+  return patchPattern(id, p => {
+    const b = p.build || { startedAt: Date.now(), done: [], deducted: {}, txIds: [] };
+    const set = new Set(b.done);
+    if (done) set.add(code); else set.delete(code);
+    return { ...p, status: p.status === 'done' ? p.status : 'building', build: { ...b, done: [...set] } };
+  });
+}
+
+/**
+ * 结算：把这些颗数从库存扣掉，记一笔流水，更新拼豆进度。
+ * amounts: { 色号: 颗数 }；finish=true 表示这幅图结束了（全部拼好，或不拼了）
+ */
+export async function settleBuild(id, amounts, { finish = false, partial = false, note = '' } = {}) {
+  const changes = Object.entries(amounts).filter(([, n]) => n > 0).map(([code, n]) => ({ code, delta: -n }));
+  const patch = (p, txId, time, txDeltas) => {
+    const b = p.build || { startedAt: time, done: [], deducted: {}, txIds: [] };
+    const deducted = { ...(b.deducted || {}) };
+    for (const d of txDeltas) deducted[d.code] = (deducted[d.code] || 0) - d.delta;
+    const nb = { ...b, deducted, txIds: txId != null ? [...(b.txIds || []), txId] : (b.txIds || []) };
+    if (finish) Object.assign(nb, { finishedAt: time, partial });
+    return { ...p, build: nb, status: finish ? 'done' : 'building', txId, doneAt: finish ? time : p.doneAt || null };
+  };
+  if (!changes.length) {
+    // 什么都不用扣（比如全都已经扣过了）：只改状态
+    return patchPattern(id, p => patch(p, null, Date.now(), [])).then(() => null);
+  }
+  return applyChanges(changes, { type: 'consume', patternId: id, clampZero: true, patternPatch: patch, note });
+}
 
 export async function savePattern(p) {
   const rec = { createdAt: Date.now(), status: 'pending', ...p };

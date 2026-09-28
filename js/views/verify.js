@@ -25,6 +25,15 @@ export async function renderVerify(app) {
 }
 
 async function discard(app) {
+  const pid = app.rec.session?.patternId;
+  if (pid) {
+    // 修改已保存图纸的颜色：放弃修改，回到图纸详情
+    if (!(await confirmDialog('放弃这次修改？', { ok: '放弃', danger: true, detail: '图纸保持原来的颜色和数量。' }))) return;
+    app.rec.session = null; app.rec.step = 'pick';
+    await store.clearSession();
+    app.pat.page = 'detail'; app.pat.id = pid;
+    return app.render();
+  }
   if (!(await confirmDialog('放弃这次识别？', { ok: '放弃', danger: true, detail: '已核对的内容不会保存。' }))) return;
   const ids = store.sessionImageIds(app.rec.session);
   app.rec.session = null;
@@ -261,7 +270,7 @@ function renderList(app) {
   const ready = s.items.length > 0 && !unverified && !errors;
   view.append(h('div.sticky-actions',
     ready
-      ? h('button.btn.primary.big.block', { onclick: () => { app.rec.step = 'preview'; app.saveSession(); app.render(); } }, '下一步：对照库存预览')
+      ? h('button.btn.primary.big.block', { onclick: () => { app.rec.step = 'preview'; app.saveSession(); app.render(); } }, '下一步：保存图纸')
       : s.items.length
         ? h('button.btn.big.block', {
           onclick: () => { s.mode = 'card'; s.cursor = s.items.findIndex(i => !i.verified || itemIssues(i, s).some(x => x.level === 'error')); app.saveSession(); app.render(); },

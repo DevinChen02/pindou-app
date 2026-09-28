@@ -1,7 +1,8 @@
-// 库存预览（拼这幅图后每种颜色还剩多少）→ 确认拼豆 → 完成（补货提醒 / 撤销）
-import { h, clear, toast, confirmDialog, chip, fmtNum, copyText } from '../ui.js';
+// 添加图纸的最后一步：起名、加分类、对照库存 → 保存到图纸库（或直接开始拼豆）
+import { h, clear, toast, chip, fmtNum, copyText } from '../ui.js';
 import * as store from '../store.js';
 import { openImageViewer, entriesFromImages, hasViewable } from '../viewer.js';
+import { tagSheet, goPattern } from './patterns.js';
 
 function sessionItems(s) {
   return s.items.filter(i => i.code && i.count > 0).map(i => ({ code: i.code, count: i.count }));
@@ -17,7 +18,7 @@ export async function renderPreview(app) {
   const s = app.rec.session;
   if (!s) { app.rec.step = 'pick'; return app.render(); }
   const settings = app.settings;
-  app.setTitle('库存预览');
+  app.setTitle(s.patternId ? '保存修改' : '保存图纸');
   app.setBack(() => { app.rec.step = 'verify'; s.mode = 'list'; app.saveSession(); app.render(); });
   const view = clear(app.view);
   const inv = await store.getInventory();
@@ -37,7 +38,7 @@ export async function renderPreview(app) {
     const lack = short.reduce((a, r) => a + -r.after, 0);
     view.append(h('div.banner.bad', h('span.ico', '⛔️'), h('div',
       h('b', `${short.length} 种颜色不够，共缺 ${fmtNum(lack)} 颗`),
-      h('div.small', '补货后再来确认；也可以先“存为待拼”，之后在“历史”里继续。'))));
+      h('div.small', '可以先存到图纸库，补货后再拼；也可以先拼够的颜色。'))));
   } else if (low.length) {
     view.append(h('div.banner.warn', h('span.ico', '⚠️'), h('div',
       h('b', '全部够用'), h('div.small', `但拼完后有 ${low.length} 种颜色会低于补货线。`))));
@@ -57,41 +58,35 @@ export async function renderPreview(app) {
   view.append(h('div.table-wrap', table));
   view.append(h('p.small.muted', `共 ${rows.length} 色、${fmtNum(totalNeed)} 颗。补货线：默认 ${settings.defaultThreshold} 颗（可在库存里为单个颜色另设）。`));
 
-  const saveAsPending = async () => {
-    const pid = await ensurePattern(s, 'pending');
-    await store.clearSession();
-    app.rec.session = null;
-    app.rec.step = 'pick';
-    toast('已存为待拼，可在“历史”里继续', 'ok');
-    app.go('history');
-    return pid;
+  // 分类（保存时一起存）
+  const tagRow = h('div.pd-tags', { style: { margin: '10px 0 2px' } });
+  const drawTags = () => {
+    clear(tagRow);
+    for (const t of s.tags || []) tagRow.append(h('span.tagchip.big', '#' + t));
+    tagRow.append(h('button.tagadd', { onclick: () => tagSheet(app, { tags: s.tags || [] }, { onSave: tags => { s.tags = tags; app.saveSession(); drawTags(); } }) }, s.tags?.length ? '✎ 分类' : '＋ 加分类'));
+  };
+  drawTags();
+  view.insertBefore(tagRow, view.children[1]);
+
+  const save = async build => {
+    try {
+      const isEdit = !!s.patternId;
+      const pid = await ensurePattern(s, 'pending');
+      await store.clearSession();
+      app.rec.session = null;
+      app.rec.step = 'pick';
+      if (build) { await store.startBuild(pid); return goPattern(app, pid, 'build'); }
+      toast(isEdit ? '已保存修改' : '已保存到图纸库', 'ok');
+      return goPattern(app, pid);
+    } catch (e) { toast(e.message, 'error'); }
   };
 
   view.append(h('div.sticky-actions',
-    h('button.btn.primary.big.block', {
-      disabled: short.length > 0,
-      onclick: async () => {
-        const ok = await confirmDialog('确认开始拼这幅图？', {
-          ok: '确认，扣减库存',
-          detail: `将从库存扣减 ${rows.length} 种颜色，共 ${fmtNum(totalNeed)} 颗。之后可以在“历史”里撤销。`,
-        });
-        if (!ok) return;
-        try {
-          const pid = await ensurePattern(s, 'pending');
-          const txId = await store.commitPattern(pid, rows);
-          app.rec.result = { txId, patternId: pid, rows, name: s.name };
-          app.rec.step = 'done';
-          await store.clearSession();
-          app.render();
-        } catch (e) {
-          toast(e.message, 'error');
-          app.render();
-        }
-      },
-    }, short.length ? `还缺 ${short.length} 种颜色，不能确认` : '确认拼豆，扣减库存'),
-    h('div.row.gap',
-      h('button.btn.grow', { onclick: saveAsPending }, '存为待拼'),
-      (short.length || low.length) ? h('button.btn.grow', { onclick: () => copyText(shoppingList(short, low)) }, '复制补货清单') : null)));
+    s.patternId
+      ? h('button.btn.primary.big.block', { onclick: () => save(false) }, '保存修改')
+      : [h('button.btn.primary.big.block', { onclick: () => save(true) }, '保存并开始拼豆'),
+        h('button.btn.big.block', { onclick: () => save(false) }, '先存到图纸库'),
+        (short.length || low.length) ? h('button.btn.ghost.block', { onclick: () => copyText(shoppingList(short, low)) }, '复制补货清单') : null]));
 }
 
 function shoppingList(short, low) {
@@ -106,66 +101,23 @@ async function ensurePattern(s, status) {
   if (s.patternId) {
     const p = await store.getPattern(s.patternId);
     if (p) {
-      await store.updatePattern({ ...p, name: s.name || p.name, items });
+      // 颜色变了：拼豆板按旧颜色认的格子不准了，下次拼豆时重新生成
+      const same = p.items.map(i => i.code).sort().join() === items.map(i => i.code).sort().join();
+      await store.updatePattern({ ...p, name: s.name || p.name, items, tags: s.tags || p.tags || [], ...(same ? {} : { board: null, boardError: null }) });
       return s.patternId;
     }
   }
   const t = { images: s.images.map(im => im.thumb).filter(Boolean).slice(0, 4) };
-  // 整张图纸原图跟着图纸保存，以后在“历史”里也能放大看
-  const images = s.images.filter(im => im.fullId).map(im => ({ fullId: im.fullId, fw: im.fw, fh: im.fh, name: im.name || '' }));
+  // 整张图纸原图跟着图纸保存，以后能放大看、生成拼豆板；legend 是清单在原图上的位置（生成拼豆板时避开它）
+  const images = s.images.filter(im => im.fullId).map(im => ({
+    fullId: im.fullId, fw: im.fw, fh: im.fh, name: im.name || '',
+    legend: im.fullMap ? { x: im.fullMap.ox, y: im.fullMap.oy, w: im.dw * im.fullMap.k, h: im.dh * im.fullMap.k } : null,
+  }));
   const id = await store.savePattern({
-    name: s.name || '未命名图纸', status, items, method: s.method,
+    name: s.name || '未命名图纸', status, items, method: s.method, tags: s.tags || [],
     statedTotal: s.statedTotal || null, thumbs: t.images,
     images, imageIds: images.map(im => im.fullId),
   });
   s.patternId = id;
   return id;
-}
-
-export async function renderDone(app) {
-  const res = app.rec.result;
-  const tx = res && (await store.listTransactions()).find(t => t.id === res.txId);
-  if (!res || !tx || tx.undone) { app.rec.result = null; app.rec.step = 'pick'; return app.render(); }
-  app.setTitle('已开始拼豆');
-  const settings = app.settings;
-  const view = clear(app.view);
-  const inv = await store.getInventory();
-  const used = res.rows.map(r => r.code);
-  const need = used.map(code => ({ code, stock: store.stockOf(inv, code), threshold: store.thresholdOf(inv, code, settings) }))
-    .filter(x => x.stock < x.threshold);
-  const others = store.lowStockList(inv, settings).filter(x => !used.includes(x.code));
-  const total = res.rows.reduce((a, r) => a + r.need, 0);
-
-  view.append(h('div.banner.ok', h('span.ico', '✅'), h('div', h('b', `“${res.name || '这幅图'}”已扣减库存`), h('div.small', `${res.rows.length} 种颜色，共 ${fmtNum(total)} 颗。`))));
-
-  if (need.length) {
-    view.append(h('div.card',
-      h('h2', `🛒 这些颜色该补货了（${need.length}）`),
-      h('p.small.muted', '拼完后剩余已低于补货线：'),
-      h('div.list', need.map(x => h('div.li',
-        chip(x.code, { size: 'md' }),
-        h('div.grow', h('b.mono', `剩 ${fmtNum(x.stock)} 颗`), h('div.tiny.muted', `补货线 ${x.threshold}`)),
-        h('span.tag.warn', '需补货')))),
-      h('div.spacer'),
-      h('button.btn.block', { onclick: () => copyText(need.map(x => `${x.code}：剩 ${x.stock} 颗`).join('\n')) }, '复制补货清单')));
-  } else {
-    view.append(h('div.card', h('h2', '👍 用到的颜色都还充足'), h('p.small.muted', '拼完后都在补货线以上。')));
-  }
-  if (others.length) view.append(h('p.small.muted', `另外还有 ${others.length} 种颜色之前就低于补货线，可在“库存 → 待补货”查看。`));
-
-  view.append(h('div.col', { style: { marginTop: '12px' } },
-    h('button.btn.primary.big.block', { onclick: () => { app.rec.result = null; app.rec.session = null; app.rec.step = 'pick'; app.render(); } }, '完成'),
-    h('button.btn.block', {
-      onclick: async () => {
-        if (!(await confirmDialog('撤销这次扣减？', { ok: '撤销', danger: true, detail: '库存会恢复到确认之前，这幅图会变回“待拼”。' }))) return;
-        try {
-          await store.undoTransaction(res.txId);
-          toast('已撤销', 'ok');
-          app.rec.result = null;
-          app.rec.step = 'pick';
-          app.go('history');
-        } catch (e) { toast(e.message, 'error'); }
-      },
-    }, '撤销这次扣减'),
-    h('button.btn.ghost.block', { onclick: () => app.go('inventory') }, '查看库存')));
 }

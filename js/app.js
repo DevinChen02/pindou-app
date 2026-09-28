@@ -1,31 +1,37 @@
-// 入口：底部标签切换、共享状态、启动时恢复未完成的核对。
+// 入口：底部三个标签（图纸 / 库存 / 设置）、共享状态、启动时恢复未完成的核对。
 import * as store from './store.js';
-import { renderRecognize } from './views/recognize.js';
+import { renderPatterns, resetPatternsUI } from './views/patterns.js';
 import { renderInventory } from './views/inventory.js';
-import { renderHistory } from './views/history.js';
 import { renderSettings } from './views/settings.js';
 import { clear, toast } from './ui.js';
 
 const views = {
-  recognize: renderRecognize,
+  patterns: renderPatterns,
   inventory: renderInventory,
-  history: renderHistory,
   settings: renderSettings,
 };
 
 export const app = {
-  tab: 'recognize',
+  tab: 'patterns',
   settings: null,
+  // 图纸标签里的页面：list 列表 / detail 详情 / add 添加（识别流程）/ build 拼豆 / totals 多选合计 / done 结算完成
+  pat: { page: 'list', id: null, result: null },
   // 识别流程的状态（works 里有 canvas，只在内存里；session 会存进数据库）
   rec: { step: 'pick', method: null, works: [], session: null, status: '', abort: null },
   view: document.getElementById('view'),
   title: document.getElementById('title'),
   actions: document.getElementById('top-actions'),
   backBtn: document.getElementById('back-btn'),
+  onLeave: null,
 
   async render() {
     this.settings = await store.getSettings();
     for (const b of document.querySelectorAll('#tabbar button')) b.classList.toggle('on', b.dataset.tab === this.tab);
+    // 离开上一个页面：拼豆板等页面的清理
+    try { this.onLeave?.(); } catch { /* 忽略 */ }
+    this.onLeave = null;
+    document.body.classList.remove('mode-build');
+    this.view.className = '';
     clear(this.actions);
     this.backBtn.hidden = true;
     this.backBtn.onclick = null;
@@ -75,9 +81,12 @@ export const app = {
 document.getElementById('tabbar').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]');
   if (!b) return;
-  if (b.dataset.tab === 'settings') app.settingsPage = null; // 再点一次“设置”回到设置首页
-  app.fresh = true; // 再点一次“历史”也回到图纸列表
-  app.go(b.dataset.tab);
+  const tab = b.dataset.tab;
+  if (tab === 'settings') app.settingsPage = null; // 再点一次“设置”回到设置首页
+  // 再点一次“图纸”回到图纸列表（正在添加的图纸会保留，列表顶上可以继续）；从别的标签切回来则回到原来的页面
+  if (tab === 'patterns' && app.tab === 'patterns') { app.pat.page = 'list'; resetPatternsUI(); }
+  app.fresh = true;
+  app.go(tab);
 });
 
 async function start() {
@@ -94,6 +103,7 @@ async function start() {
       app.rec.session = s;
       app.rec.step = s.step;
       app.rec.method = s.method;
+      app.pat.page = 'add';
     }
   } catch (e) { console.warn(e); }
   await app.render();
