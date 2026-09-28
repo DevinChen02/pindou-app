@@ -1,6 +1,8 @@
 // 把图纸截图“数字化”成拼豆板：找网格 → 每格取色 → 按清单里的颜色归类。
 // 纯函数，浏览器和 Node（测试）都能用。img = { data: RGBA, width, height }
-import { rgbToLab, rgbOf, isCode } from './palette.js';
+import { rgbToLab } from './palette.js';
+import { classifyGrid, boardReview } from './cells.js';
+export { classifyGrid };
 
 const dLab = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 
@@ -165,8 +167,129 @@ function lineCov(L, W, axis, pos, cross) {
   return segs ? ok / segs : 0;
 }
 
+function extendGrid(img, xs, ys, R, headerLike) {
+  const stats0 = sampleCells(img, xs, ys);
+  const labOf = st => (st ? rgbToLab(st.rgb) : null);
+  // 网格里出现过的颜色（量化成小格，≥2 格才算）
+  const bins = new Map();
+  const key = l => `${Math.round(l[0] / 4)},${Math.round(l[1] / 4)},${Math.round(l[2] / 4)}`;
+  for (const st of stats0) { if (!st) continue; const k = key(labOf(st)); bins.set(k, (bins.get(k) || 0) + 1); }
+  const seen = l => {
+    const b = [Math.round(l[0] / 4), Math.round(l[1] / 4), Math.round(l[2] / 4)];
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) for (let k = -1; k <= 1; k++) if ((bins.get(`${b[0] + i},${b[1] + j},${b[2] + k}`) || 0) >= 2) return true;
+    return false;
+  };
+  // 最多的颜色当“空格色”
+  let emptyKey = null, emptyN = 0;
+  for (const [k, n] of bins) if (n > emptyN) { emptyN = n; emptyKey = k; }
+  const isEmptyColor = l => { const [a, b, c] = emptyKey.split(',').map(Number); return Math.abs(Math.round(l[0] / 4) - a) <= 1 && Math.abs(Math.round(l[1] / 4) - b) <= 1 && Math.abs(Math.round(l[2] / 4) - c) <= 1; };
+  const px = (xs[xs.length - 1] - xs[0]) / (xs.length - 1), py = (ys[ys.length - 1] - ys[0]) / (ys.length - 1);
+  // 一排候选格子能不能并进来
+  const ok = (cells, labelCells) => {
+    if (!cells.length || cells.some(c => !c)) return false;
+    if (headerLike(cells)) return false;
+    const labs = cells.map(labOf);
+    if (labs.filter(seen).length < cells.length * 0.85) return false;
+    const hasBead = labs.some(l => !isEmptyColor(l));
+    // 编号栏在继续：外侧那一格有字，而且和上一排外侧那格颜色一样
+    const [lab, prev] = labelCells;
+    const labelled = lab && prev && lab.ink > 0.04 && dLab(labOf(lab), labOf(prev)) < 8;
+    return hasBead || labelled;
+  };
+  const cellAt = (x0, y0, x1, y1) => sampleCells(img, [x0, x1], [y0, y1])[0];
+  for (let guard = 0; guard < 3; guard++) {
+    let changed = false;
+    // 下
+    const yb = Math.round(ys[ys.length - 1] + py);
+    if (yb <= R.ry1 + 2 && yb < img.height) {
+      const y0 = ys[ys.length - 1];
+      const cells = sampleCells(img, xs, [y0, yb]);
+      const lab = xs[0] - px >= 0 ? [cellAt(Math.round(xs[0] - px), y0, xs[0], yb), cellAt(Math.round(xs[0] - px), ys[ys.length - 2], xs[0], y0)] : [];
+      if (ok(cells, lab)) { ys = [...ys, yb]; changed = true; }
+    }
+    // 上
+    const yt = Math.round(ys[0] - py);
+    if (yt >= R.ry0 - 2 && yt >= 0) {
+      const cells = sampleCells(img, xs, [yt, ys[0]]);
+      const lab = xs[0] - px >= 0 ? [cellAt(Math.round(xs[0] - px), yt, xs[0], ys[0]), cellAt(Math.round(xs[0] - px), ys[0], xs[0], ys[1])] : [];
+      if (ok(cells, lab)) { ys = [yt, ...ys]; changed = true; }
+    }
+    // 右
+    const xr = Math.round(xs[xs.length - 1] + px);
+    if (xr <= R.rx1 + 2 && xr < img.width) {
+      const x0 = xs[xs.length - 1];
+      const cells = sampleCells(img, [x0, xr], ys);
+      const lab = ys[0] - py >= 0 ? [cellAt(x0, Math.round(ys[0] - py), xr, ys[0]), cellAt(xs[xs.length - 2], Math.round(ys[0] - py), x0, ys[0])] : [];
+      if (ok(cells, lab)) { xs = [...xs, xr]; changed = true; }
+    }
+    // 左
+    const xl = Math.round(xs[0] - px);
+    if (xl >= R.rx0 - 2 && xl >= 0) {
+      const cells = sampleCells(img, [xl, xs[0]], ys);
+      const lab = ys[0] - py >= 0 ? [cellAt(xl, Math.round(ys[0] - py), xs[0], ys[0]), cellAt(xs[0], Math.round(ys[0] - py), xs[1], ys[0])] : [];
+      if (ok(cells, lab)) { xs = [xl, ...xs]; changed = true; }
+    }
+    if (!changed) break;
+  }
+  return { xs, ys };
+}
+
+/** 梳子得分：按周期 q 取最好的相位，齿上的平均值 / 整体平均值（越大越像真周期） */
+function combScore(P, lo, hi, q) {
+  let mean = 0; for (let i = lo; i < hi; i++) mean += P[i]; mean /= Math.max(1, hi - lo);
+  if (!(mean > 0)) return 0;
+  let best = 0;
+  for (let ph = 0; ph < q; ph += 0.5) {
+    let s = 0, n = 0;
+    for (let x = lo + ph; x < hi - 1; x += q) { s += Math.max(P[Math.floor(x)], P[Math.ceil(x)]); n++; }
+    if (n && s / n > best) best = s / n;
+  }
+  return best / mean;
+}
+
+/** 台阶剖面：每个位置上，沿另一个方向有多少像素是“色块交界”（前两个像素、后两个像素各自平稳，前后差很多） */
+function stepProfile(img, axis, lo, hi, c0, c1) {
+  const { data: d, width: W, height: H } = img;
+  const P = new Float64Array(axis === 'y' ? H : W);
+  const dist2 = (i, j) => { const a = d[i] - d[j], b = d[i + 1] - d[j + 1], c = d[i + 2] - d[j + 2]; return a * a + b * b + c * c; };
+  const step = axis === 'y' ? W * 4 : 4, cstep = axis === 'y' ? 4 : W * 4;
+  for (let a = Math.max(2, lo); a < Math.min(axis === 'y' ? H - 2 : W - 2, hi); a++) {
+    let n = 0;
+    let i = axis === 'y' ? (a * W + c0) * 4 : (c0 * W + a) * 4;
+    for (let b = c0; b < c1; b++, i += cstep) {
+      if (dist2(i - step, i + step) > 1600 && dist2(i - 2 * step, i - step) < 144 && dist2(i + step, i + 2 * step) < 144) n++;
+    }
+    P[a] = n;
+  }
+  return P;
+}
+/** 用台阶剖面校正格线相位（周期不变）；差得不多或台阶太少就不动 */
+function phaseFix(img, lines, cross, axis, lo, hi) {
+  if (lines.length < 4) return lines;
+  const p = (lines[lines.length - 1] - lines[0]) / (lines.length - 1);
+  const a0 = lines[0] - Math.round(p), a1 = lines[lines.length - 1] + Math.round(p);
+  const P = stepProfile(img, axis, a0, a1, cross[0], cross[cross.length - 1]);
+  let best = -1, bph = 0;
+  for (let ph = 0; ph < p; ph += 0.25) {
+    let sc = 0;
+    for (let x = a0 + ph; x < a1; x += p) sc += Math.max(P[Math.floor(x)] || 0, P[Math.ceil(x)] || 0);
+    if (sc > best) { best = sc; bph = ph; }
+  }
+  const teeth = (a1 - a0) / p;
+  if (best / teeth < 8) return lines;
+  const cur = (((lines[0] - a0) % p) + p) % p;
+  let dph = bph - cur;
+  if (dph > p / 2) dph -= p; else if (dph < -p / 2) dph += p;
+  if (Math.abs(dph) <= Math.max(2.5, p / 5)) return lines;
+  // 整体平移；平移后超出范围的去掉，另一头补一条
+  let out = lines.map(v => Math.round(v + dph));
+  if (dph > 0 && out[0] - p >= lo) out = [Math.round(out[0] - p), ...out];
+  if (dph < 0 && out[out.length - 1] + p < hi) out = [...out, Math.round(out[out.length - 1] + p)];
+  return out.filter(v => v >= lo && v < hi);
+}
+
 /**
- * 一格的底色和“有没有字”。底色取各通道的中位数（字只占格子的一小部分，中位数不受它影响；
+ * 一格的底色和“有没有字”（找网格时判断表头、往外补格子用）。底色取各通道的中位数（字只占格子的一小部分，中位数不受它影响；
  * 比取众数稳，JPEG 的色度噪声会把红底打散到很多色桶里），再在它附近取平均。
  */
 const HR = new Uint32Array(256), HG = new Uint32Array(256), HB = new Uint32Array(256);
@@ -211,11 +334,11 @@ export function sampleCells(img, xs, ys) {
 }
 
 /** 手动校准：用户点了网格左上角、右下角，并告诉我们几列几行 */
-export function gridFromCorners(img, { x0, y0, x1, y1, cols, rows, refs }) {
-  const xs = Array.from({ length: cols + 1 }, (_, i) => x0 + (x1 - x0) * i / cols);
-  const ys = Array.from({ length: rows + 1 }, (_, i) => y0 + (y1 - y0) * i / rows);
-  const res = classify(sampleCells(img, xs, ys), refs);
-  return { rows, cols, ...res, geom: { xs: xs.map(Math.round), ys: ys.map(Math.round), pitch: (x1 - x0) / cols, manual: true } };
+export function gridFromCorners(img, { x0, y0, x1, y1, cols, rows, refs, locks = null }) {
+  const xs = Array.from({ length: cols + 1 }, (_, i) => Math.round(x0 + (x1 - x0) * i / cols));
+  const ys = Array.from({ length: rows + 1 }, (_, i) => Math.round(y0 + (y1 - y0) * i / rows));
+  const res = classifyGrid(img, xs, ys, refs, { locks });
+  return { ...res, rows, cols, geom: { xs, ys, pitch: (x1 - x0) / cols, manual: true } };
 }
 
 /**
@@ -224,7 +347,7 @@ export function gridFromCorners(img, { x0, y0, x1, y1, cols, rows, refs }) {
  * opts.refs:   [{ code, rgb?, count }] 清单里的颜色（rgb 为清单色块的实际取色，没有就用色卡标准色）
  * 返回 { rows, cols, codes, cells(Uint8Array，0=空，i+1=codes[i]), counts, stats, geom }
  */
-export function digitize(img, { region, refs }) {
+export function digitize(img, { region, refs, locks = null }) {
   const W = img.width, H = img.height, d = img.data;
   const R = region || { x: 0, y: 0, w: W, h: H };
   const rx0 = Math.max(0, Math.round(R.x)), ry0 = Math.max(0, Math.round(R.y));
@@ -244,8 +367,12 @@ export function digitize(img, { region, refs }) {
   const ratio = Math.max(gx.pitch, gy.pitch) / Math.min(gx.pitch, gy.pitch);
   if (ratio > 1.2) {
     const n = Math.round(ratio);
-    if (Math.abs(ratio - n) > 0.15 * n) return { error: '横竖格子大小对不上' };
-    const p = n === 2 ? Math.max(gx.pitch, gy.pitch) : Math.min(gx.pitch, gy.pitch);
+    let p;
+    if (Math.abs(ratio - n) > 0.15 * n) {
+      // 不是整数倍（比如一边被字的行距带偏成 3/4 格）：两个候选周期都在横竖两个剖面上试，梳子对得最齐的赢
+      const sc = q => combScore(Px, rx0, rx1, q) + combScore(Py, ry0, ry1, q);
+      p = sc(gx.pitch) >= sc(gy.pitch) ? gx.pitch : gy.pitch;
+    } else p = n === 2 ? Math.max(gx.pitch, gy.pitch) : Math.min(gx.pitch, gy.pitch);
     gy = gridLines(Py, ry0, ry1, p);
     if (!gy) return { error: '没找到网格横线' };
     Px = profile(L, W, H, 'x', rx0, rx1, gy.lines[0], gy.lines[gy.lines.length - 1]);
@@ -255,6 +382,10 @@ export function digitize(img, { region, refs }) {
   gy = gridLines(profile(L, W, H, 'y', gx.lines[0], gx.lines[gx.lines.length - 1], ry0, ry1), ry0, ry1, (gx.pitch + gy.pitch) / 2) || gy;
 
   let xs = gx.lines, ys = gy.lines;
+  // 相位检查：格线很浅、每格又印着字时，“字的那一行”也会形成周期性的峰，可能锁到错位的位置上。
+  // 用“色块交界”（两边各自平稳、彼此差很多的台阶）再对一次相位：字的笔画不是台阶，格子交界才是
+  ys = phaseFix(img, ys, xs, 'y', ry0, ry1);
+  xs = phaseFix(img, xs, ys, 'x', rx0, rx1);
   // 两头间距不对的（比如网格下面隔了一行坐标数字的分隔线）先去掉
   const pitchNow = (gx.pitch + gy.pitch) / 2;
   const trimSteps = a => {
@@ -282,16 +413,26 @@ export function digitize(img, { region, refs }) {
   // 去掉写着行号/列号的表头行列：整行颜色一致、而且几乎每格都有字
   const headerLike = list => {
     const inks = list.filter(s => s && s.ink > 0.04).map(s => s.ink);
-    if (inks.length < list.length * 0.7) return false;
+    const all0 = list.map(s => (s ? s.ink : 0));
+    const avg0 = a => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
+    // 编号是浅灰小字、图又缩小过时，一位数的格子可能“没字”：编号特征很明显就放宽
+    const step0 = all0.length >= 14 && (avg0(all0.slice(0, 9)) < avg0(all0.slice(9)) * 0.6 || avg0(all0.slice(-9)) < avg0(all0.slice(0, -9)) * 0.6);
+    if (inks.length < list.length * (step0 ? 0.5 : 0.7)) return false;
     // 表头写的是 1、2、…、10、11 这样各不相同的数字，字的多少差别大；
     // 一整排同一个色号（比如整行 H2）每格的字一模一样，不算表头
     const mu = inks.reduce((a, b) => a + b, 0) / inks.length;
     const sd = Math.sqrt(inks.reduce((a, b) => a + (b - mu) ** 2, 0) / inks.length);
-    if (sd / mu < 0.18) return false;
+    // 编号从 1 开始：1~9 是一位数，10 起是两位数，字明显变多（正着编、倒着编都算）
+    const all = list.map(s => (s ? s.ink : 0));
+    const avg = a => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
+    const digitStep = all.length >= 14 && (avg(all.slice(0, 9)) < avg(all.slice(9)) * 0.85 || avg(all.slice(-9)) < avg(all.slice(0, -9)) * 0.85);
+    const strongStep = all.length >= 14 && (avg(all.slice(0, 9)) < avg(all.slice(9)) * 0.75 || avg(all.slice(-9)) < avg(all.slice(0, -9)) * 0.75);
+    if (sd / mu < 0.18 && !digitStep) return false;
     const labs = list.filter(Boolean).map(s => rgbToLab(s.rgb));
     const med = labs.map(l => l).sort((a, b) => a[0] - b[0])[labs.length >> 1];
     const same = labs.filter(l => dLab(l, med) < 8).length;
-    return same >= labs.length * 0.9;
+    // 底色一致（水印、半透明编号栏会让一部分格子颜色偏一点；编号特征很明显时放宽）
+    return same >= labs.length * (strongStep ? 0.6 : 0.9);
   };
   let trimmed = true, guard = 0;
   while (trimmed && guard++ < 6 && rows > 3 && cols > 3) {
@@ -305,112 +446,14 @@ export function digitize(img, { region, refs }) {
     if (trimmed) { rows = ys.length - 1; cols = xs.length - 1; stats = cellsOf(xs, ys); }
   }
 
-  const res = classify(stats, refs);
-  return { rows, cols, ...res, geom: { xs, ys, pitch: (gx.pitch + gy.pitch) / 2, dbg } };
-}
+  // 往外补格子：两头的格线太浅没找到（最后一两行全是空格、下面紧挨着编号栏等）。
+  // 补的条件：新的一排格子颜色都是网格里已有的颜色、不像编号栏，而且
+  // 旁边的编号栏还在继续（有行号/列号），或者这一排里有豆子
+  ({ xs, ys } = extendGrid(img, xs, ys, { rx0, ry0, rx1, ry1 }, headerLike));
+  rows = ys.length - 1; cols = xs.length - 1;
 
-/** 按颜色归类（带“清单颗数”约束） */
-export function classify(stats, refs) {
-  const codes = refs.map(r => r.code);
-  const K = codes.length;
-  const N = stats.length;
-  const lab = stats.map(s => (s ? rgbToLab(s.rgb) : [100, 0, 0]));
-  const ink = stats.map(s => (s ? s.ink : 0));
-  // 参考色：色卡标准色（实测比清单色块取色稳：清单色块常被画成半透明或带字），后面还会按格子实际颜色修正
-  let refLab = refs.map(r => rgbToLab(isCode(r.code) ? rgbOf(r.code) : r.rgb || [128, 128, 128]));
-  const target = refs.map(r => r.count || 0);
-  const total = target.reduce((a, b) => a + b, 0);
-
-  // 图纸格子里有没有印色号：有的话“有字 = 有豆子”是很强的线索
-  const inkCells = ink.filter(v => v > 0.04).length;
-  const printed = inkCells > Math.min(N * 0.25, total * 0.5);
-  const TEXT = printed ? 14 : 0;
-
-  // 空格颜色：没字的格子里最常见的颜色（没印色号时：离所有清单颜色都远的格子里最常见的）
-  const pool = [];
-  for (let i = 0; i < N; i++) {
-    if (printed ? ink[i] <= 0.02 : Math.min(...refLab.map(r => dLab(lab[i], r))) > 12) pool.push(lab[i]);
-  }
-  let emptyLab = [98, 0, 0];
-  if (pool.length) {
-    const bins = new Map();
-    for (const l of pool) {
-      const k = `${Math.round(l[0] / 4)},${Math.round(l[1] / 4)},${Math.round(l[2] / 4)}`;
-      const b = bins.get(k) || { n: 0, s: [0, 0, 0] };
-      b.n++; b.s[0] += l[0]; b.s[1] += l[1]; b.s[2] += l[2];
-      bins.set(k, b);
-    }
-    let best = null; for (const b of bins.values()) if (!best || b.n > best.n) best = b;
-    emptyLab = best.s.map(v => v / best.n);
-  }
-
-  const bias = new Float64Array(K);
-  const assign = new Int16Array(N);
-  const costs = new Float32Array(N * (K + 1));
-  const fillCosts = () => {
-    for (let i = 0; i < N; i++) {
-      const hasInk = ink[i] > 0.04;
-      costs[i * (K + 1)] = dLab(lab[i], emptyLab) + (hasInk ? TEXT : 0);
-      for (let k = 0; k < K; k++) costs[i * (K + 1) + k + 1] = dLab(lab[i], refLab[k]) + (hasInk ? 0 : TEXT);
-    }
-  };
-  const run = () => {
-    const cnt = new Int32Array(K);
-    for (let i = 0; i < N; i++) {
-      let bk = 0, bv = costs[i * (K + 1)];
-      for (let k = 0; k < K; k++) {
-        const v = costs[i * (K + 1) + k + 1] + bias[k];
-        if (v < bv) { bv = v; bk = k + 1; }
-      }
-      assign[i] = bk;
-      if (bk) cnt[bk - 1]++;
-    }
-    return cnt;
-  };
-  // “带颗数约束的归类”：哪类比清单多了就给它加一点代价，少了就减一点（拉格朗日乘子），
-  // 再用归到每类的格子的实际颜色修正参考色，反复几轮（相当于带约束的 k-means）
-  const constrained = (iters) => {
-    let cnt = run();
-    if (!(total > 0)) return cnt;
-    let bestErr = Infinity, stall = 0, bestBias = Float64Array.from(bias);
-    for (let it = 0; it < iters; it++) {
-      let err = 0;
-      for (let k = 0; k < K; k++) err += Math.abs(cnt[k] - target[k]);
-      if (err < bestErr) { bestErr = err; stall = 0; bestBias = Float64Array.from(bias); } else if (++stall > 80) break;
-      if (!err) break;
-      const step = 0.4 * (it < 100 ? 1 : it < 250 ? 0.5 : 0.25);
-      for (let k = 0; k < K; k++) {
-        const e = cnt[k] - target[k];
-        if (e) bias[k] = Math.max(-30, Math.min(30, bias[k] + Math.sign(e) * Math.min(1, Math.abs(e) / Math.max(4, target[k] * 0.05)) * step));
-      }
-      cnt = run();
-    }
-    // 回到误差最小的那一组
-    bias.set(bestBias);
-    return run();
-  };
-  fillCosts();
-  let cnt;
-  for (let round = 0; round < 4; round++) {
-    cnt = constrained(400);
-    if (round === 3) break;
-    // 用每类格子的颜色中位数更新参考色（格子里的真实颜色比清单色块/色卡更准）
-    const groups = refLab.map(() => []);
-    for (let i = 0; i < N; i++) if (assign[i]) groups[assign[i] - 1].push(lab[i]);
-    refLab = refLab.map((r, k) => {
-      const g = groups[k];
-      if (g.length < 3) return r;
-      const med = j => g.map(l => l[j]).sort((a, b) => a - b)[g.length >> 1];
-      return [med(0), med(1), med(2)];
-    });
-    fillCosts();
-  }
-  const counts = Object.fromEntries(codes.map((c, k) => [c, cnt[k]]));
-  const diff = codes.map((c, k) => ({ code: c, want: target[k], got: cnt[k] })).filter(x => x.want !== x.got);
-  return {
-    codes, cells: Uint8Array.from(assign), counts,
-    stats: { printed, exact: codes.length - diff.length, total: codes.length, diff, beads: cnt.reduce((a, b) => a + b, 0), want: total },
-  };
+  const res = classifyGrid(img, xs, ys, refs, { locks });
+  return { ...res, rows, cols, geom: { xs, ys, pitch: (gx.pitch + gy.pitch) / 2, dbg } };
 }
 
 // ---------- 存取：cells 压成字符串存进数据库 ----------
@@ -423,4 +466,33 @@ export function unpackCells(str) {
   const a = new Uint8Array(str.length);
   for (let i = 0; i < str.length; i++) a[i] = str.charCodeAt(i) - 48;
   return a;
+}
+
+/**
+ * 存进数据库的拼豆板记录。locks：Map(格子→类序号)，存成 [[格子, 色号], …]（色号比序号稳：清单顺序可能变）
+ */
+export function boardRecord(res, imageId, extra = {}, locks = null) {
+  const { xs, ys } = res.geom;
+  const lk = locks ? [...locks].map(([i, k]) => [i, k ? res.codes[k - 1] : '']) : [];
+  return {
+    v: 2, rows: res.rows, cols: res.cols, codes: res.codes, cells: packCells(res.cells),
+    stats: res.stats, imageId,
+    geom: { x0: xs[0], y0: ys[0], x1: xs[xs.length - 1], y1: ys[ys.length - 1], xs: xs.map(Math.round), ys: ys.map(Math.round) },
+    review: boardReview(res, { cols: res.cols, locks }),
+    locks: lk,
+    createdAt: Date.now(), edits: 0, ...extra,
+  };
+}
+
+/** 记录里的锁定格子 → Map(格子→类序号)，按当前 refs 的顺序（refs 里没有的色号丢掉） */
+export function locksFor(board, refs) {
+  if (!board?.locks?.length) return null;
+  const m = new Map();
+  for (const [i, code] of board.locks) {
+    if (i >= board.rows * board.cols) continue;
+    const k = code ? refs.findIndex(r => r.code === code) + 1 : 0;
+    if (code && !k) continue;
+    m.set(i, k);
+  }
+  return m.size ? m : null;
 }

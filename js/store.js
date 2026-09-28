@@ -20,7 +20,7 @@ export const DEFAULT_SETTINGS = {
       workerToken: '',
       twoPass: true,                // 先定位清单、再放大读取
     },
-    ocr: { enabled: false, basePath: './vendor/tesseract/' },
+    ocr: { enabled: false, engine: 'ppocr', basePath: './vendor/tesseract/' },
     text: { enabled: true },
   },
   defaultMethod: 'text',

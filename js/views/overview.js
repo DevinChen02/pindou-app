@@ -5,6 +5,10 @@ import { nearestCodes } from '../palette.js';
 import { itemIssues, totalsCheck, newId } from '../extract/index.js';
 import { makeCanvas, sampleSwatch } from '../image.js';
 import { openImageViewer } from '../viewer.js';
+import { boardRecord } from '../board.js';
+import { runBoard } from '../boardasync.js';
+import { identityRisks } from '../cells.js';
+import { loadPixels, gridRegion } from './build.js';
 
 const union = (a, b) => (!a ? b : !b ? a : { x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) });
 const median = a => { const s = a.filter(Number.isFinite).sort((x, y) => x - y); return s.length ? s[s.length >> 1] : null; };
@@ -129,6 +133,13 @@ export function renderOverview(app, { discard }) {
   const noPos = s.items.filter(it => !(it.img != null && it.box)).length;
   if (noPos) view.append(h('p.small.muted', `其中 ${noPos} 项没有位置（手动添加或位置没识别出来），不在图上画框。`));
   view.append(h('div.center', h('button.link', { onclick: () => addByPick(app) }, '＋ 手动添加一个颜色')));
+
+  // ---- 和拼豆板交叉核对：把网格数字化，看每种颜色图上有几格（不按清单凑数） ----
+  const ck = h('div.card.ov-check', h('div.row.gap', h('div.spinner.sm'), h('span.small.muted', '正在把图纸数字化，和清单交叉核对…')));
+  if (s.images.some(im => im.fullId)) {
+    view.append(ck);
+    setTimeout(() => crossCheck(app, s, ck), 60);
+  }
 
   const firstTodo = s.items.findIndex(i => !i.verified);
   view.append(h('div.sticky-actions',
@@ -294,3 +305,65 @@ async function addByPick(app) {
   setTimeout(() => app.view.querySelector('.stepper input')?.focus(), 50);
 }
 
+
+// ---------- 交叉核对：清单 vs 拼豆板 ----------
+export const itemsSig = items => {
+  const m = new Map();
+  for (const it of items) if (it.code && it.count > 0) m.set(it.code, (m.get(it.code) || 0) + it.count);
+  return [...m].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([c, n]) => `${c}:${n}`).join(',');
+};
+
+async function crossCheck(app, s, card) {
+  const sig = itemsSig(s.items);
+  const refs = sig ? sig.split(',').map(x => { const [code, n] = x.split(':'); return { code, count: +n }; }) : [];
+  if (!refs.length) { card.remove(); return; }
+  let out = s.boardCheck?.sig === sig ? s.boardCheck : null;
+  if (!out) {
+    try {
+      const im = s.images.find(x => x.fullId);
+      const legend = im.fullMap ? { x: im.fullMap.ox, y: im.fullMap.oy, w: im.dw * im.fullMap.k, h: im.dh * im.fullMap.k } : null;
+      const { canvas, data } = await loadPixels({ fullId: im.fullId });
+      const res = await runBoard('digitize', data, { region: gridRegion({ legend }, canvas), refs });
+      if (res.error) { out = { sig, error: res.error }; }
+      else {
+        const free = res.stats.freeCounts || {};
+        // 颜色几乎一样的几种（相近色）单独数没意义，合成一组比总数
+        const grp = new Map(refs.map(r => [r.code, r.code]));
+        const find = c => { while (grp.get(c) !== c) c = grp.get(c); return c; };
+        for (const r of identityRisks(res)) if (r.reason === 'close') for (const q of r.partners) grp.set(find(q), find(r.code));
+        const groups = new Map();
+        for (const r of refs) { const g = find(r.code); const e = groups.get(g) || { codes: [], want: 0, free: 0 }; e.codes.push(r.code); e.want += r.count; e.free += free[r.code] || 0; groups.set(g, e); }
+        const rows = [...groups.values()].map(e => ({ code: e.codes.join('/'), codes: e.codes, want: e.want, free: e.free }));
+        out = {
+          sig, cols: res.cols, rows: res.rows,
+          off: rows.filter(r => Math.abs(r.free - r.want) > Math.max(3, r.want * 0.12)),
+          suspects: (res.suspects || []).slice(0, 4).map(x => ({ n: x.n, rgb: x.rgb, near: x.near.map(y => y.code) })),
+          beads: res.stats.beads,
+        };
+        // 顺手把拼豆板存进会话：保存图纸时清单没变就直接用，开始拼豆不用再算一遍
+        s.boardPre = { sig, board: boardRecord(res, im.fullId, { auto: true }) };
+      }
+    } catch (e) { out = { sig, error: e.message || String(e) }; }
+    s.boardCheck = out;
+    if (app.rec.session === s) app.saveSession();
+  }
+  if (!card.isConnected) return;
+  clear(card);
+  card.append(h('div.row.between', h('b', '🧩 和图纸上的格子对一对'), out.cols ? h('span.tiny.muted', `${out.cols}×${out.rows} 格`) : null));
+  if (out.error) { card.append(h('p.small.muted', `没能自动找到网格（${out.error}），跳过这一步。`)); return; }
+  if (!out.off.length && !out.suspects.length) {
+    card.append(h('p.small.ok-t', '✓ 图上每种颜色的格数都和清单对得上，也没发现清单外的颜色。'));
+    return;
+  }
+  card.append(h('p.tiny.muted', '这是不按清单凑数、只看图上颜色和格子里印的字数出来的，只作参考：差很多的，多半是色号或数量读错了。'));
+  for (const r of out.off) {
+    const codes = r.codes || [r.code];
+    card.append(h('div.ck-row', h('span.row.gap-s', codes.map(c => chip(c, { size: 'sm' }))),
+      h('span.grow', r.free === 0 ? `图上没找到这种颜色（清单写 ${fmtNum(r.want)} 颗）——色号是不是认错了？`
+        : `${codes.length > 1 ? '这几种颜色很接近，合起来' : ''}清单 ${fmtNum(r.want)} 颗，图上大约 ${fmtNum(r.free)} 格`)));
+  }
+  for (const x of out.suspects) {
+    card.append(h('div.ck-row', h('span.sw', { style: { background: `rgb(${x.rgb.join(',')})` } }),
+      h('span.grow', `图上有一种颜色（约 ${x.n} 格）清单里没有，像 ${x.near.join(' / ')}——是不是漏了？`)));
+  }
+}
