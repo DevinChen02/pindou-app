@@ -347,7 +347,28 @@ export function gridFromCorners(img, { x0, y0, x1, y1, cols, rows, refs, locks =
  * opts.refs:   [{ code, rgb?, count }] 清单里的颜色（rgb 为清单色块的实际取色，没有就用色卡标准色）
  * 返回 { rows, cols, codes, cells(Uint8Array，0=空，i+1=codes[i]), counts, stats, geom }
  */
-export function digitize(img, { region, refs, locks = null, dewatermark = false }) {
+/**
+ * 数字化：找网格 + 逐格归类。颗数明显比清单少时，多半是框（或自动猜的清单位置）切掉了网格边上的一两行/列：
+ * 四周各放宽 3 格再找一次，行列只多不少、颗数和清单差得少一半以上才用新的结果。
+ */
+export function digitize(img, opts) {
+  const res = digitizeOnce(img, opts);
+  const want = (opts.refs || []).reduce((a, r) => a + (r.count || 0), 0);
+  if (res.error || !want || !opts.region || opts.noRetry) return res;
+  const beads = res.stats?.beads ?? 0;
+  if (beads >= want - Math.max(3, want * 0.015)) return res;
+  const p = res.geom.pitch || 10, R = opts.region, W = img.width, H = img.height;
+  const x0 = Math.max(0, R.x - 3 * p), y0 = Math.max(0, R.y - 3 * p);
+  const x1 = Math.min(W, R.x + R.w + 3 * p), y1 = Math.min(H, R.y + R.h + 3 * p);
+  if (x0 >= R.x && y0 >= R.y && x1 <= R.x + R.w && y1 <= R.y + R.h) return res;
+  const r2 = digitizeOnce(img, { ...opts, region: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } });
+  if (r2.error) return res;
+  const grew = r2.rows >= res.rows && r2.cols >= res.cols;
+  const d1 = Math.abs(beads - want), d2 = Math.abs((r2.stats?.beads ?? 0) - want);
+  return grew && d2 < d1 * 0.5 ? { ...r2, geom: { ...r2.geom, extended: true } } : res;
+}
+
+function digitizeOnce(img, { region, refs, locks = null, dewatermark = false }) {
   const W = img.width, H = img.height, d = img.data;
   const R = region || { x: 0, y: 0, w: W, h: H };
   const rx0 = Math.max(0, Math.round(R.x)), ry0 = Math.max(0, Math.round(R.y));

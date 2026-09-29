@@ -2,9 +2,11 @@
 //   ① 框出拼豆板在原图上的位置 → ② 识别网格，算出图纸尺寸（行列数、有豆子的范围）
 //   → ③ 选自己用的拼豆板尺寸（输入，或点选存好的常用尺寸；放不下整幅图的不能选）
 //   → ④ 把豆子整体上下左右平移摆好（不能超出拼豆板）
-import { h, clear, toast, sheet, fmtNum } from '../ui.js';
+import { h, clear, toast, sheet, fmtNum, chip } from '../ui.js';
 import * as store from '../store.js';
 import { cropper } from '../cropper.js';
+import { swatchCandidates } from '../image.js';
+import { readCells } from '../ocrcells.js';
 import { gridFromCorners, boardRecord, locksFor, unpackCells } from '../board.js';
 import { runBoard } from '../boardasync.js';
 import { createPanZoom } from '../panzoom.js';
@@ -169,6 +171,11 @@ async function gridStep(app, p, view) {
   }
   const refs = merged(p);
   const want = refs.reduce((a, r) => a + r.count, 0);
+  if (st.pendingSwatch && st.board) {
+    const c = st.pendingSwatch; st.pendingSwatch = null;
+    if ((st.board.stats?.legendUsed || []).includes(c)) toast(`${c} 已按你点的颜色重新识别`, 'ok');
+    else toast(`图纸格子里找不到一批和你点的一样的颜色，${c} 还是按色卡色认。换个地方（色块中间、别点到字）再点一次`, 'error');
+  }
   if (st.gridError && !st.board) {
     view.append(h('div.banner.bad', h('span.ico', '⚠️'), h('div', h('b', '框里没找到网格'), h('div.small', `${st.gridError}。没有格线的图纸（比如只有色块和棋盘格底纹）需要手动告诉我有几行几列。`))));
   } else {
@@ -185,7 +192,25 @@ async function gridStep(app, p, view) {
       h('div.row.between', h('span.small.muted', '有豆子的范围'), h('b', `${b.w} 列 × ${b.h} 行`)),
       h('div.row.between', h('span.small.muted', '豆子'), h('b', `${fmtNum(beads)} 颗`, want ? h('span.small.muted', `（清单 ${fmtNum(want)}）`) : null)),
       // 有几种颜色是按清单色块在图上的实际颜色认的（其余按色卡标准色 + 校准）
-      refs.some(r => r.swatch) ? h('div.row.between.su-legend', h('span.small.muted', '按清单色块的颜色认'), h('b', `${(st.board.stats?.legendUsed || []).length} / ${refs.length} 种`)) : null));
+      h('div.row.between.su-legend', h('span.small.muted', '按清单色块的颜色认'), h('b', `${(st.board.stats?.legendUsed || []).length} / ${refs.length} 种`)),
+      st.board.ocrRead ? h('div.row.between.su-ocr-done', h('span.small.muted', '逐格读了色号'), h('b', `${fmtNum(st.board.ocrRead)} 格 ✓`)) : null));
+    // 没对上清单色块的颜色：只能按色卡标准色认，容易认错——让用户在图上点它的色块，再重新识别
+    const used = new Set(st.board.stats?.legendUsed || []);
+    const missing = refs.filter(r => !used.has(r.code));
+    if (missing.length) {
+      view.append(h('div.card.su-miss',
+        h('div', h('b', `${missing.length} 种颜色还没对上清单色块`)),
+        h('div.small.muted', { style: { margin: '2px 0 8px' } }, '这几种只能按色卡标准色认，出图软件的颜色和色卡差得多时容易认错。点一下色号，再在图上点它的色块（清单里的那个色块，或者图纸上任意一颗这个颜色的豆子），会重新识别。'),
+        h('div.row.wrap.gap-s', missing.map(r => h('button.code-cell.su-miss-code', { 'data-code': r.code, onclick: () => pickSwatch(app, p, r.code) },
+          chip(r.code, { size: 'sm' }), h('span.tiny.muted', r.swatchSure ? '点的颜色没对上' : r.swatch ? '取色没对上' : '没取到色'))))));
+    }
+    // 颜色很接近 / 和色卡差得多的几种：只看颜色容易整种认反 → 可以让识字模型把这些格子上印的色号逐格读出来
+    const riskCodes = new Set();
+    for (const r of st.board.review?.risks || []) { riskCodes.add(r.code); for (const pc of r.partners || []) riskCodes.add(pc); }
+    const bcells = unpackCells(st.board.cells);
+    const ocrIdx = [];
+    for (let i = 0; i < bcells.length; i++) if (bcells[i] && riskCodes.has(st.board.codes[bcells[i] - 1])) ocrIdx.push(i);
+    if (ocrIdx.length && !st.board.ocrRead) view.append(ocrCard(app, p, ocrIdx, [...riskCodes]));
     if (want && Math.abs(beads - want) > Math.max(3, want * 0.03)) {
       view.append(h('div.banner.warn', h('span.ico', '⚠️'), h('div', h('b', '颗数和清单差得比较多'), h('div.small', '看看上面红框是不是正好框住了所有格子；不对的话点“行列数不对”手动校准。'))));
     }
@@ -197,6 +222,87 @@ async function gridStep(app, p, view) {
       h('button.btn.ghost', { onclick: () => { st.step = 'frame'; app.rerender(); } }, '重新框选')),
     h('div.spacer'),
     st.board ? h('button.btn.primary.block.big', { onclick: () => { st.step = 'peg'; app.rerender(); } }, '对，下一步：选拼豆板尺寸') : null);
+}
+
+/** 逐格读色号：读完和颜色一起重新归类（不改网格） */
+function ocrCard(app, p, idx, codes) {
+  const secs = Math.max(5, Math.round(idx.length * 0.035));
+  const status = h('div.small.su-ocr-status');
+  const stopBtn = h('button.btn.sm.ghost', { hidden: true }, '停止');
+  const go = h('button.btn.soft.su-ocr-go', {
+    onclick: async () => {
+      go.disabled = true; stopBtn.hidden = false;
+      const ctl = { aborted: false };
+      stopBtn.onclick = () => { ctl.aborted = true; stopBtn.disabled = true; status.textContent = '正在停止…'; };
+      const board = st.board;
+      const refs = merged(p);
+      const lex = refs.map(r => r.code);
+      const { xs, ys } = board.geom;
+      try {
+        await ensurePixels(p);
+        const t0 = Date.now();
+        const { scores, done } = await readCells(st.pix.data, xs, ys, idx, lex, {
+          signal: ctl,
+          onProgress: m => {
+            if (m.phase === 'model') status.textContent = `下载识字模型 ${Math.round(m.progress * 100)}%（只有第一次）`;
+            else {
+              const left = m.done ? Math.round((Date.now() - t0) / m.done * (m.total - m.done) / 1000) : secs;
+              status.textContent = `读色号 ${m.done} / ${m.total}，还要约 ${left} 秒`;
+            }
+          },
+        });
+        if (!done) { status.textContent = '没有读'; go.disabled = false; stopBtn.hidden = true; return; }
+        status.textContent = '按读到的色号和颜色一起重新归类…';
+        const keep = p.board?.locks?.length && p.board.imageId === st.im.fullId && p.board.rows === board.rows && p.board.cols === board.cols ? p.board : null;
+        const locks = keep ? locksFor(keep, refs) : null;
+        const res = await runBoard('classify', st.pix.data, { xs, ys, refs, opt: { locks, dewatermark: !!board.dewatermark, ocr: { scores, w: 8, early: true } } });
+        res.rows = board.rows; res.cols = board.cols;
+        const before = unpackCells(board.cells);
+        let changed = 0;
+        for (let i = 0; i < res.cells.length; i++) {
+          const a = before[i] ? board.codes[before[i] - 1] : '', b = res.cells[i] ? res.codes[res.cells[i] - 1] : '';
+          if (a !== b) changed++;
+        }
+        if (app.pat.page !== 'build' || st.board !== board) return; // 期间换了网格
+        st.board = boardRecord({ ...res, geom: { xs, ys } }, board.imageId, { auto: board.auto, manual: board.manual, dewatermark: !!board.dewatermark, ocrRead: done }, locks);
+        st.clean = null;
+        toast(`读了 ${done} 格色号${changed ? `，${changed} 格改了颜色` : '，拼豆板没有变化'}`, 'ok');
+        app.rerender();
+      } catch (e) {
+        status.textContent = '✗ ' + (e.message || e);
+        go.disabled = false; stopBtn.hidden = true;
+      }
+    },
+  }, '开始逐格读色号');
+  return h('div.card.su-ocr',
+    h('div', h('b', '🔍 逐格读色号（更准，要等一会儿）')),
+    h('div.small.muted', { style: { margin: '2px 0 8px' } },
+      `${codes.join('、')} 这几种颜色很接近、或者和色卡差得多，只看颜色容易整种认反。用识字模型把这 ${fmtNum(idx.length)} 格上印的色号一格一格读出来，和颜色一起判断。第一次要下载约 19 MB 模型；大约 ${secs} 秒，可以随时停止。`),
+    h('div.row.gap', go, stopBtn), status);
+}
+
+/** 在图上点某个色号的色块：取那一点周围的颜色，记到图纸清单里（用户点的，归类时优先信），再重新识别网格 */
+async function pickSwatch(app, p, code) {
+  try { await ensurePixels(p); } catch (e) { toast(e.message, 'error'); return; }
+  const hint = `在图上点 ${code} 的色块（清单里的色块，或者一颗 ${code} 豆子）`;
+  openImageViewer(entriesFromImages([st.im]), {
+    view: 'full', focus: false, hint,
+    onTap: async ({ x, y, view, close }) => {
+      if (view.key !== 'full') { toast('请在“整张图”上点'); return; }
+      close();
+      const g0 = st.board?.geom;
+      const pitch = g0 && st.board.cols ? (g0.x1 - g0.x0) / st.board.cols : 16;
+      const r = Math.max(3, pitch * 0.3);
+      let cands = null;
+      try { cands = swatchCandidates(st.pix.canvas, { x0: x - r, y0: y - r, x1: x + r, y1: y + r }, 0); } catch { cands = null; }
+      if (!cands) { toast('没取到颜色，再点一次', 'error'); return; }
+      await store.patchPattern(p.id, pp => ({ ...pp, items: pp.items.map(it => (it.code === code ? { ...it, swatch: cands, swatchSure: true } : it)) }));
+      st.pendingSwatch = code;
+      st.board = null; st.gridError = null; st.clean = null;
+      app.rerender();
+    },
+  });
+  toast(hint);
 }
 
 /** 去水印后的整张图（只给人看；在后台线程算，算好了缓存起来再刷新） */

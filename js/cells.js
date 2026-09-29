@@ -323,16 +323,18 @@ export function classifyFeatures(F, refs, opt = {}) {
       let best = null;
       for (const c of cands) {
         const L = labOf(c);
-        if (!whiteCode && emptyLab.some(e => de2000(L, e) < 3)) continue; // 取到的是白底
+        if (!whiteCode && emptyLab.some(e => de2000(L, e) < 3)) continue; // 取到的是白底（点歪了也一样）
         const d = de2000(L, refLab[k]);
-        if (d > maxDE || (best && d >= best.d)) continue;
+        // 用户自己在图上点的色块（swatchSure）：不管离色卡色多远都信，只要图上有一批格子是这个颜色
+        if ((d > maxDE && !refs[k].swatchSure) || (best && d >= best.d)) continue;
         let sup = 0;
         for (let i = 0; i < N && sup < need; i++) if (Math.abs(labs[i][0] - L[0]) < 5 && de2000(labs[i], L) < tol) sup++;
         if (sup >= need) best = { k, L, d };
       }
       if (best) picks.push(best);
     }
-    picks.sort((a, b) => a.d - b.d);
+    // 用户点的排最前（抢同一个颜色时优先），其余按离色卡色从近到远
+    picks.sort((a, b) => (refs[b.k].swatchSure ? 1 : 0) - (refs[a.k].swatchSure ? 1 : 0) || a.d - b.d);
     for (const p of picks) {
       if (picks.some(q => q !== p && legendLab[q.k] && de2000(q.L, p.L) < 1)) continue;
       legendLab[p.k] = p.L;
@@ -340,6 +342,19 @@ export function classifyFeatures(F, refs, opt = {}) {
     for (let k = 0; k < K; k++) if (legendLab[k]) refLab[k] = legendLab[k];
   }
   const colorCost = new Float32Array(N * K1);
+  // 识字模型读出的每格色号（opt.ocr.scores[i] = 每个色号 + 空 的对数概率）：换算成代价，和颜色一起算
+  let ocrCost = null;
+  if (opt.ocr) {
+    const { scores, w = 8, cap = 8 } = opt.ocr;
+    ocrCost = new Float32Array(N * K1);
+    for (let i = 0; i < N; i++) {
+      const sc = scores[i];
+      if (!sc) continue;
+      let mx = -Infinity; for (const v of sc) if (v > mx) mx = v;
+      for (let k = 1; k < K1; k++) ocrCost[i * K1 + k] = w * Math.min(cap, mx - sc[k - 1]);
+      ocrCost[i * K1] = w * Math.min(cap, mx - sc[K]);
+    }
+  }
   // “覆盖率”：这一格里有多大比例的像素就是这个颜色。豆子几乎铺满整格（除了字）；
   // 水印、半透明遮挡的格子中位色会偏，但覆盖率一看就不像任何一种豆子
   const cover = (i, rgbs) => {
@@ -382,6 +397,7 @@ export function classifyFeatures(F, refs, opt = {}) {
       colorCost[i * K1] = de[0] + coverW * Math.max(0, 1 - cover(i, emRgb) / 0.7);
       for (let k = 0; k < K; k++) colorCost[i * K1 + k + 1] = de[k + 1] + coverW * Math.max(0, 1 - cover(i, [refRgb[k]]) / 0.7);
     }
+    if (ocrCost && opt.ocr.early) for (let j = 0; j < N * K1; j++) colorCost[j] += ocrCost[j];
   };
   const cost = new Float32Array(N * K1);
   const inkCost = () => {
@@ -545,6 +561,12 @@ export function classifyFeatures(F, refs, opt = {}) {
       if (opt.debug) opt.debug.s0 = s0;
     }
     textUsed = true;
+  }
+
+  // 识字的结果（没在一开始就算进颜色代价时）：最后加上再解一次
+  if (ocrCost && !opt.ocr.early) {
+    for (let j = 0; j < N * K1; j++) cost[j] += ocrCost[j];
+    sol = solve(sol.assign);
   }
 
   // ---- 去水印模式：同一色号的格子本来长得一模一样（同一个颜色、同一个字），

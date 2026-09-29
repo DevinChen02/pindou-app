@@ -679,3 +679,9 @@ main.build-view { position: fixed; left: 0; right: 0; bottom: 0; top: calc(var(-
 /* 高亮当前颜色的开关（和镜像并排）；窄屏只显示图标 */
 .bd-zoom .bd-spot.on { background: var(--accent); }
 @media (max-width: 370px) { .bd-zoom .t { display: none; } }
+/* 识别网格：没对上清单色块的颜色，点色号再到图上点色块 */
+.su-miss { margin-top: 10px; border: 1.5px dashed var(--warn); }
+.su-miss-code { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 64px; }
+/* 识别网格：逐格读色号 */
+.su-ocr { margin-top: 10px; }
+.su-ocr-status { margin-top: 6px; color: var(--muted); min-height: 1.2em; }

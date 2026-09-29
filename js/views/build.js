@@ -18,12 +18,13 @@ const bs = { pid: null, sel: null, edit: false, busy: false };
 
 /** 图纸的颜色清单（同一色号合并）；带上清单色块在图上的颜色（swatch），拼豆板归类时当参考色 */
 export const merged = p => {
-  const m = new Map(), sw = new Map();
+  const m = new Map(), sw = new Map(), sure = new Set();
   for (const it of p.items) {
     m.set(it.code, (m.get(it.code) || 0) + it.count);
     if (!sw.has(it.code) && it.swatch?.length) sw.set(it.code, it.swatch);
+    if (it.swatchSure) sure.add(it.code);
   }
-  return [...m].map(([code, count]) => ({ code, count, swatch: sw.get(code) || null }));
+  return [...m].map(([code, count]) => ({ code, count, swatch: sw.get(code) || null, ...(sure.has(code) ? { swatchSure: true } : {}) }));
 };
 const rgbFor = code => (isCode(code) ? rgbOf(code) : [180, 180, 180]);
 
@@ -151,11 +152,8 @@ export async function renderBuild(app) {
       h('button.wide', { onclick: () => pz.fit() }, '适合'),
       h('button', { 'aria-label': '放大', onclick: () => pz.zoomBy(1.6) }, '＋'));
     if (place.mirror) stage.append(h('div.bd-mirror-tag', '镜像中（左右翻转）'));
-    // 放大后行号、列号固定在左边、上边（选了颜色时，每行几颗固定在右边）
-    const selIdx = bs.sel ? board.codes.indexOf(bs.sel) + 1 : 0;
-    const rowCounts = selIdx ? new Array(place.H).fill(0) : null;
-    if (selIdx) for (let r = 0; r < board.rows; r++) for (let c = 0; c < board.cols; c++) if (board.cells[r * board.cols + c] === selIdx && r + place.oy >= 0 && r + place.oy < place.H) rowCounts[r + place.oy]++;
-    const rulers = makeRulers(stage, place, rowCounts);
+    // 放大后行号、列号固定在左边、上边
+    const rulers = makeRulers(stage, place);
     stage.append(layer, ...rulers.els, info, zoomBar);
     if (bs.edit) stage.append(h('div.bd-editbar', h('span', '✏️ 修正模式：点格子改颜色'), h('button.btn.sm', { onclick: () => { bs.edit = false; app.rerender(); } }, '完成')));
     else if (reviewCount(board) && !board.reviewedAt && !bs.hideReview) {
@@ -240,7 +238,7 @@ export async function renderBuild(app) {
       chip(it.code, { size: 'md' }),
       h('div.grow',
         h('b', `${it.code} · ${fmtNum(it.count)} 颗`),
-        board ? h('div.tiny.muted', (bc === it.count ? '' : `板上 ${bc} / 清单 ${it.count} · `) + (spot ? `亮的 = 正在拼，暗的 = 已拼好，${show === 'real' ? '没拼的先不画' : '最暗 = 还没拼'}，右边红字 = 每行几颗` : show === 'real' ? '浅色 = 已拼好，没拼的先不画，右边红字 = 每行几颗' : '浅色 = 已拼好，最淡 = 还没拼，右边红字 = 每行几颗')) : null),
+        board ? h('div.tiny.muted', (bc === it.count ? '' : `板上 ${bc} / 清单 ${it.count} · `) + (spot ? `亮的 = 正在拼，暗的 = 已拼好，${show === 'real' ? '没拼的先不画' : '最暗 = 还没拼'}` : show === 'real' ? '浅色 = 已拼好，没拼的先不画' : '浅色 = 已拼好，最淡 = 还没拼')) : null),
       h('button.btn' + (isDone ? '.ghost' : '.ok'), {
         onclick: async () => {
           await store.setColorDone(p.id, it.code, !isDone);
@@ -284,7 +282,7 @@ export function placeOf(board) {
   if (P && P.W > 0 && P.H > 0) return { W: P.W, H: P.H, ox: P.ox || 0, oy: P.oy || 0, mirror: !!P.mirror };
   return { W: board.cols, H: board.rows, ox: 0, oy: 0, mirror: false };
 }
-export const boardSize = P => ({ W: M + P.W * CELL + 30, H: M + P.H * CELL + 8 });
+export const boardSize = P => ({ W: M + P.W * CELL + 8, H: M + P.H * CELL + 8 });
 
 async function toggleMirror(app, p) {
   const on = !p.board.place?.mirror;
@@ -320,7 +318,6 @@ export function drawBoard(g, q, board, { sel, done, place = null, show = 'real',
   const peg = dark ? '#55555b' : '#dedbd4';
   const colorOf = codes.map(c => rgbFor(c));
   const rad = CELL * 0.43, hole = CELL * 0.13;
-  const rowCount = new Array(rows).fill(0);
   // 图纸网格以外的拼豆板位置：浅灰底（摆放时看得出图纸占哪一块）
   const gx0 = P.ox, gy0 = P.oy, gx1 = P.ox + board.cols, gy1 = P.oy + board.rows;
   if (gx0 > 0 || gy0 > 0 || gx1 < cols || gy1 < rows) {
@@ -343,7 +340,6 @@ export function drawBoard(g, q, board, { sel, done, place = null, show = 'real',
         continue;
       }
       const code = codes[v - 1];
-      if (v === selIdx) rowCount[r]++;
       // 这颗豆子现在是哪种：cur 正在拼 / done 已拼好 / todo 还没拼
       const stage = v === selIdx ? 'cur' : done.has(code) ? 'done' : selIdx ? 'todo' : 'cur';
       if (stage === 'todo' && show === 'real') {
@@ -390,24 +386,19 @@ export function drawBoard(g, q, board, { sel, done, place = null, show = 'real',
   for (let c = 1; c <= cols; c++) if (c === 1 || c % 5 === 0) g.fillText(String(c), M + (c - 0.5) * CELL, M / 2);
   g.textAlign = 'right';
   for (let r = 1; r <= rows; r++) if (r === 1 || r % 5 === 0) g.fillText(String(r), M - 4, M + (r - 0.5) * CELL);
-  // 选中颜色时：右边标出每行有几颗
-  if (selIdx) {
-    g.textAlign = 'left'; g.fillStyle = '#e8604c'; g.font = `700 9px -apple-system, sans-serif`;
-    rowCount.forEach((n, r) => { if (n) g.fillText(String(n), M + cols * CELL + 4, M + (r + 0.5) * CELL); });
-  }
 }
 
 // ---------- 固定在边上的行号、列号 ----------
 
 /**
  * 放大后，画布上自带的行号（左边）、列号（上边）会移出屏幕：在舞台边上盖三条尺子，
- * 跟着缩放平移实时重画——左边行号、上边列号；选了颜色时右边是每行几颗。
+ * 跟着缩放平移实时重画——左边行号、上边列号。
  * 画布自带的那排数字还在屏幕里时，对应的尺子不显示。
  */
-function makeRulers(stage, P, rowCounts) {
-  const TH = 20, LW = 28, RW = 24;
-  const top = h('canvas.bd-ruler.top'), left = h('canvas.bd-ruler.left'), right = h('canvas.bd-ruler.right');
-  for (const c of [top, left, right]) c.style.display = 'none';
+function makeRulers(stage, P) {
+  const TH = 20, LW = 28;
+  const top = h('canvas.bd-ruler.top'), left = h('canvas.bd-ruler.left');
+  for (const c of [top, left]) c.style.display = 'none';
   let raf = 0, last = null;
   const font = w => `${w} 10px -apple-system, "PingFang SC", sans-serif`;
   const prep = (cv, w, hh) => {
@@ -427,8 +418,7 @@ function makeRulers(stage, P, rowCounts) {
     // 画布自带的数字（上边中线 M/2、左边右对齐到 M-4）移出屏幕了才盖尺子，不挡住没放大时的豆子
     const showTop = st.ty + (M / 2) * st.s < 4;
     const showLeft = st.tx + (M - 10) * st.s < 2;
-    const showRight = !!rowCounts && st.tx + (M + P.W * CELL + 4) * st.s > sw - RW;
-    const x0 = showLeft ? LW : 0, y0 = showTop ? TH : 0, x1 = showRight ? sw - RW : sw;
+    const x0 = showLeft ? LW : 0, y0 = showTop ? TH : 0, x1 = sw;
     if (showTop) {
       const g = prep(top, sw, TH), step = stepFor(cs);
       g.strokeStyle = 'rgba(0,0,0,.14)'; g.lineWidth = 1;
@@ -458,21 +448,9 @@ function makeRulers(stage, P, rowCounts) {
       }
       if (showTop) { g.fillStyle = 'rgba(247,246,243,1)'; g.fillRect(0, 0, LW, TH); } // 左上角的空角
     } else left.style.display = 'none';
-    if (showRight) {
-      const g = prep(right, RW, sh);
-      g.strokeStyle = 'rgba(0,0,0,.14)'; g.lineWidth = 1;
-      g.beginPath(); g.moveTo(0.5, 0); g.lineTo(0.5, sh); g.stroke();
-      g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = font(700); g.fillStyle = '#e8604c';
-      for (let r = 0; r < P.H; r++) {
-        if (!rowCounts[r]) continue;
-        const y = st.ty + (M + (r + 0.5) * CELL) * st.s;
-        if (y < y0 + 5 || y > sh - 5) continue;
-        g.fillText(String(rowCounts[r]), RW / 2, y);
-      }
-    } else right.style.display = 'none';
   }
   return {
-    els: [top, left, right],
+    els: [top, left],
     update(st) { last = { s: st.s, tx: st.tx, ty: st.ty }; if (!raf) raf = requestAnimationFrame(() => { raf = 0; if (stage.isConnected) draw(last); }); },
   };
 }
