@@ -5,6 +5,8 @@ import { testConnection } from '../extract/vlm.js';
 import { testOcr, REC_MODELS, cellModelOf, downloadMB, getPP } from '../extract/ocr.js';
 import { renderPaletteManager } from './palette.js';
 import { PALETTE, SERIES } from '../palette.js';
+import { APP_VERSION } from '../version.js';
+import { updater } from '../app.js';
 
 const PROVIDERS = {
   anthropic: { name: 'Claude', full: 'Anthropic Claude', keyHint: 'sk-ant-…', where: 'platform.claude.com → API Keys' },
@@ -190,19 +192,19 @@ function ocrCard(app) {
   d.basePath = d.basePath || './vendor/tesseract/';
   d.engine = d.engine || 'ppocr';
   const engSeg = h('div.seg',
-    [['ppocr', '高精度（推荐）'], ['tesseract', '轻量']].map(([k, label]) => h('button' + (d.engine === k ? '.on' : ''), {
+    [['ppocr', 'PP-OCR（推荐）'], ['tesseract', 'Tesseract（轻量）']].map(([k, label]) => h('button' + (d.engine === k ? '.on' : ''), {
       type: 'button', onclick: () => { d.engine = k; for (const b of engSeg.children) b.classList.toggle('on', b.textContent === label); },
     }, label)));
   async function test(save) {
     status.className = 'status-line'; status.textContent = d.engine === 'ppocr'
-      ? '正在加载高精度识别引擎（PP-OCRv5，首次约 19 MB，之后可离线使用）…'
+      ? '正在加载识别引擎（PP-OCR，首次约 19 MB，之后可离线使用）…'
       : '正在加载离线识别引擎（首次约 7 MB，之后可离线使用）…';
     try {
       const r = await testOcr(d, m => {
         if (m.progress != null && m.status && !/recognizing/.test(m.status)) status.textContent = `正在加载离线识别引擎… ${Math.round(m.progress * 100)}%`;
         else if (/recognizing/.test(m.status || '')) status.textContent = '引擎已加载，正在自检…';
       });
-      if (!r.ok) throw new Error(r.engine && r.engine !== d.engine ? '高精度引擎在这台设备上加载不了，请改用“轻量”' : `引擎能运行，但自检图读成了：${r.got || '空'}`);
+      if (!r.ok) throw new Error(r.engine && r.engine !== d.engine ? 'PP-OCR 在这台设备上加载不了，请改用 Tesseract' : `引擎能运行，但自检图读成了：${r.got || '空'}`);
       status.className = 'status-line ok'; status.textContent = `✓ 离线识别可用（${d.engine === 'ppocr' ? 'PP-OCRv5' : 'Tesseract'}，自检读到：${r.got}）`;
       if (save) {
         s.methods.ocr = { ...structuredClone(d), enabled: true };
@@ -219,7 +221,7 @@ function ocrCard(app) {
       h('div.mtitle', '离线 OCR ', cfg.enabled ? h('span.tag.ok', '已开启') : null),
       h('div.mdesc', '在手机上识别，免费、不联网。识别前需要手动框出清单；清晰截图效果好，很糊的截图容易错。')), sw),
     open ? h('div.mbody',
-      field('识别引擎', engSeg, { note: '点选即可，不用填任何路径：两种引擎都随应用一起部署，第一次用时从你的网址下载，之后离线可用。高精度：PP-OCRv5（百度飞桨），示例图上比轻量引擎读对更多、几乎不多认，速度也更快；首次约 19 MB。轻量：Tesseract，约 7 MB。高精度加载失败时会自动改用轻量。' }),
+      field('识别引擎', engSeg, { note: '点选即可，不用填任何路径：两种引擎都随应用一起部署，第一次用时从你的网址下载，之后离线可用。PP-OCR（百度飞桨 PP-OCRv5，就是“识字模型”里的标准模型）：示例图上读对更多、几乎不多认，速度也更快；首次约 19 MB。Tesseract：约 7 MB，PP-OCR 加载失败时会自动改用它。' }),
       status,
       h('div.row.gap.wrap',
         h('button.btn.soft', { type: 'button', onclick: () => test(false) }, '自检'),
@@ -388,8 +390,22 @@ function dataCard(app) {
 }
 
 function aboutCard() {
+  const line = h('div.small.muted.about-line');
+  const btn = h('button.btn.sm.soft.about-check', {
+    type: 'button',
+    onclick: async () => {
+      btn.disabled = true; line.className = 'small muted about-line'; line.textContent = '正在检查…';
+      const r = await updater.check();
+      if (r === 'updating') line.textContent = '发现新版本，正在更新…（会自动刷新）';
+      else if (r === 'latest') { line.className = 'small about-line ok'; line.textContent = `✓ 已经是最新版本 v${APP_VERSION}`; }
+      else { line.className = 'small about-line bad'; line.textContent = '检查失败：可能没联网'; }
+      btn.disabled = false;
+    },
+  }, '检查更新');
   return h('div.card',
-    h('p', h('b', '拼豆计数器'), h('span.muted.small', '　v2.6 · 仅供个人使用')),
+    h('div.row.between', h('p', h('b', '拼豆计数器'), h('span.muted.small.about-ver', `　v${APP_VERSION}`), h('span.muted.small', ' · 仅供个人使用')), btn),
+    line,
+    h('p.small.muted', '发了新版本后，打开 App 时会自动更新（正在做事时不打断，顶上会出现“立即更新”）。'),
     h('p.small.muted', '所有库存数据只保存在这台手机的浏览器里。请从主屏幕图标打开（和 Safari 里打开的是两份独立的数据）。'),
     h('p.small.muted', `色卡：${PALETTE.size} 色（${SERIES.join(' ')}）。`));
 }

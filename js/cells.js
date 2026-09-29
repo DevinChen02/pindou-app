@@ -906,7 +906,8 @@ export function identityRisks(res, { close = 6, drift = 5 } = {}) {
   const { codes, refLab, calLab, counts, orphaned = [], fit = [] } = res;
   const out = new Map();
   const add = (k, j, reason) => {
-    const e = out.get(k) || { k: k + 1, code: codes[k], partners: new Set(), reason };
+    const e = out.get(k) || { k: k + 1, code: codes[k], partners: new Set(), reason, drift: false };
+    if (reason === 'drift') e.drift = true; // 图上的颜色和色卡差得多（可能和别的色号整种认反）
     if (j != null) e.partners.add(codes[j]);
     out.set(k, e);
   };
@@ -1030,7 +1031,7 @@ export function boardReview(res, { cols, locks = null, maxUncertain = 30, huntN 
       }
       hunt.sort((a, b) => b[1] - a[1]);
     }
-    return { code: r.code, reason: r.reason, partners: r.partners, probe, hunt: hunt.slice(0, huntN).map(x => x[0]) };
+    return { code: r.code, reason: r.reason, drift: r.drift, partners: r.partners, probe, hunt: hunt.slice(0, huntN).map(x => x[0]) };
   });
   const riskCodes = new Set(risks.map(r => r.code));
   const idx = [];

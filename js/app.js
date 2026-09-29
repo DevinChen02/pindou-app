@@ -3,7 +3,9 @@ import * as store from './store.js';
 import { renderPatterns, resetPatternsUI } from './views/patterns.js';
 import { renderInventory } from './views/inventory.js';
 import { renderSettings } from './views/settings.js';
-import { clear, toast } from './ui.js';
+import { clear, toast, h } from './ui.js';
+import { APP_VERSION } from './version.js';
+window.__appVersion = APP_VERSION; // 测试用：当前运行的版本
 
 const views = {
   patterns: renderPatterns,
@@ -110,15 +112,52 @@ async function start() {
   store.gcImages(); // 清理没人用的图纸原图（不阻塞界面）
 }
 
+// ---------- 更新到新版本 ----------
+// 发新版本后：打开 / 切回 App 时检查，新版本装好后自动刷新一次（正在做事时不打断，显示“点这里更新”）
+export const updater = {
+  reg: null,
+  ready: false,           // 新版本已经装好、接管了这个页面，但页面还是旧代码
+  /** 手动检查（设置 → 关于）。返回 'latest' | 'updating' | 'error' */
+  async check() {
+    if (!this.reg) return 'error';
+    try { await this.reg.update(); } catch { return 'error'; }
+    if (this.ready || this.reg.installing || this.reg.waiting) { this.force = true; if (this.ready) location.reload(); return 'updating'; }
+    return 'latest';
+  },
+};
+
+/** 现在刷新会不会丢掉正在做的事：弹层开着、正在添加图纸（识别中）、正在设置或拼拼豆板 */
+function busy() {
+  if (document.querySelector('.backdrop, .pz')) return true;
+  return app.tab === 'patterns' && ['add', 'build'].includes(app.pat.page);
+}
+
+function showUpdateBar() {
+  if (document.querySelector('.update-bar')) return;
+  const bar = h('div.update-bar',
+    h('span.grow', `新版本已经下载好`),
+    h('button.btn.sm.primary.update-go', { onclick: () => location.reload() }, '立即更新'),
+    h('button.icon-btn', { 'aria-label': '稍后', onclick: () => bar.remove() }, '✕'));
+  document.body.appendChild(bar);
+}
+
+function onUpdateReady() {
+  updater.ready = true;
+  if (updater.force || !busy()) location.reload();
+  else showUpdateBar();
+}
+
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-  navigator.serviceWorker.register('./sw.js').then(reg => {
-    reg?.addEventListener('updatefound', () => {
-      const nw = reg.installing;
-      nw?.addEventListener('statechange', () => {
-        if (nw.state === 'installed' && navigator.serviceWorker.controller) toast('有新版本，下次打开时生效');
-      });
-    });
-  }).catch(e => console.warn('SW 注册失败', e));
+  const hadController = !!navigator.serviceWorker.controller; // 第一次装（之前没有）不用刷新
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) onUpdateReady(); });
+  navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(reg => { updater.reg = reg; }).catch(e => console.warn('SW 注册失败', e));
+  // 从后台切回来（iPhone 上“再打开”常常只是切回来，页面不会重新加载）：检查一下有没有新版本；
+  // 之前因为在忙没刷新的，现在不忙了就刷新
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (updater.ready && !busy()) { location.reload(); return; }
+    updater.reg?.update().catch(() => {});
+  });
 }
 
 window.addEventListener('unhandledrejection', e => {

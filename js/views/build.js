@@ -105,7 +105,7 @@ function geomOf(board) {
 }
 
 /** 有多少处建议核对（相近色 + 没把握的格子） */
-function reviewCount(board) {
+export function reviewCount(board) {
   const rv = board?.review;
   if (!rv) return 0;
   return (rv.risks?.filter(r => r.probe?.length).length || 0) + (rv.uncertain?.length || 0);
@@ -120,12 +120,12 @@ export async function renderBuild(app) {
   document.body.classList.add('mode-build');
   app.setTitle(p.name || '拼豆');
   app.setBack(() => { bs.edit = false; goPattern(app, p.id); });
-  app.actions.append(h('button.btn.sm.soft', { 'aria-label': '更多', onclick: () => menu(app, p) }, '⋯'));
   const view = clear(app.view);
 
   const hasImg = p.images?.some(im => im.fullId);
-  // 第一次进来（或者还没选拼豆板尺寸）：先框拼豆板 → 识别网格 → 选拼豆板尺寸 → 摆放
+  // 第一次进来（或者还没选拼豆板尺寸）：先准备拼豆板（框选 → 网格 → 颜色 → 尺寸 → 摆放）
   if (hasImg && ((!p.board?.place && !p.boardSkip) || setupActive(p))) return renderSetup(app, p);
+  app.actions.append(h('button.btn.sm.soft', { 'aria-label': '更多', onclick: () => menu(app, p) }, '⋯'));
   view.classList.add('build-view');
   document.body.classList.add('mode-board'); // 拼豆板铺满一屏：页面本身不滚（设置拼豆板的前几步照常能上下滑）
 
@@ -157,15 +157,7 @@ export async function renderBuild(app) {
     const rulers = makeRulers(stage, place);
     stage.append(layer, ...rulers.els, info, zoomBar);
     if (bs.edit) stage.append(h('div.bd-editbar', h('span', '✏️ 修正模式：点格子改颜色'), h('button.btn.sm', { onclick: () => { bs.edit = false; app.rerender(); } }, '完成')));
-    else if (reviewCount(board) && !board.reviewedAt && !bs.hideReview) {
-      const rv = board.review;
-      const nr = rv.risks.filter(r => r.probe?.length).length, nu = rv.uncertain.length;
-      stage.append(h('div.bd-review',
-        h('div.grow', h('b', '🔍 建议核对一下'),
-          h('div.tiny', [nr ? `${nr} 种颜色很接近` : '', nu ? `${nu} 个格子没把握` : ''].filter(Boolean).join('，') + '，确认几格就能把整板纠正过来')),
-        h('button.btn.sm.primary', { onclick: () => reviewFlow(app, p) }, '核对'),
-        h('button.icon-btn', { 'aria-label': '先不核对', onclick: () => { bs.hideReview = true; app.rerender(); } }, '✕')));
-    }
+    // （核对没把握的格子在“准备拼豆板 → 颜色”那一步做；拼的时候想再核对：⋯ → 核对拼豆板）
     const { W, H } = boardSize(place);
     const q = Math.max(1, Math.min(2.5, Math.sqrt(9e6 / (W * H))));
     canvas.width = Math.round(W * q); canvas.height = Math.round(H * q);
@@ -548,8 +540,11 @@ function cellCrop(src, geo, cols, i, size = 132) {
   return cv;
 }
 
-async function reviewFlow(app, p) {
-  const board = p.board;
+/**
+ * 核对拼豆板：只问几格（相近色每种一格、没把握的格子逐个问），确认的格子锁定，整板重新计算。
+ * board：要核对的拼豆板（默认图纸上存的）；onDone(rec)：给了就把新的拼豆板交给它（准备拼豆板时还没存），否则存进图纸
+ */
+export async function reviewFlow(app, p, { board = p.board, onDone = null } = {}) {
   const im = (p.images || []).find(x => x.fullId === board.imageId);
   if (!im) { toast('原图已经不在了', 'error'); return; }
   const body = h('div.rv', h('div.bd-wait', h('div.spinner'), h('p.small.muted', '正在准备…')));
@@ -614,16 +609,17 @@ async function reviewFlow(app, p) {
   const finish = async () => {
     clear(body).append(h('div.bd-wait', h('div.spinner'), h('p.small.muted', '按你确认的格子重新计算整板…')));
     await run();
-    const rec = boardRecord({ ...res, geom: geo }, board.imageId, { auto: board.auto, manual: board.manual, reviewedAt: Date.now(), edits: board.edits || 0, place: board.place || null, dewatermark: !!board.dewatermark }, locks);
+    const rec = boardRecord({ ...res, geom: geo }, board.imageId, { auto: board.auto, manual: board.manual, reviewedAt: Date.now(), edits: board.edits || 0, place: board.place || null, dewatermark: !!board.dewatermark, ocrRead: board.ocrRead || 0 }, locks);
     const before = unpackCells(board.cells);
     let diff = 0;
     for (let i = 0; i < res.cells.length; i++) {
       const a = before[i] ? board.codes[before[i] - 1] : '', b = res.cells[i] ? res.codes[res.cells[i] - 1] : '';
       if (a !== b) diff++;
     }
-    await store.patchPattern(p.id, { board: rec });
     s.close();
     toast(diff ? `已按核对结果重新计算，${diff} 格改了颜色` : '核对完成，拼豆板没有变化', 'ok');
+    if (onDone) return onDone(rec);
+    await store.patchPattern(p.id, { board: rec });
     app.rerender();
   };
 
@@ -674,9 +670,11 @@ async function reviewFlow(app, p) {
       h('span.small.muted', steps.length ? `${Math.min(at + 1, steps.length)} / ${steps.length}` : ''),
       h('span.small', changed.size ? `已确认 ${changed.size} 格` : ''));
     body.append(head);
-    if (rv.risks.length && at === 0) {
+    if (rv.risks.some(r => r.probe.length) && at === 0 && !board.ocrRead) {
       const b = h('button.btn.sm.soft', { onclick: () => autoCheck(b) }, '🤖 先让识字模型自动核对相近色');
-      body.append(h('div.rv-auto', b, h('div.tiny.muted', '读几格上印的色号来确认（第一次要下载约 19MB 的模型）')));
+      const note = h('div.tiny.muted', '读几格上印的色号来确认');
+      import('../extract/ocr.js').then(o => o.downloadMB(o.cellModelOf(app.settings))).then(mb => { if (mb > 0) note.textContent = `读几格上印的色号来确认（第一次要下载约 ${Math.round(mb)} MB 的模型）`; }).catch(() => {});
+      body.append(h('div.rv-auto', b, note));
     }
     if (at >= steps.length) {
       body.append(h('div.rv-done',

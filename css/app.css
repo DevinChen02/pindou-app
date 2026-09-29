@@ -202,6 +202,9 @@ input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { background: var(--bad); }
+/* 新版本已下载好（正在做事时不自动刷新）：顶上一条，点“立即更新” */
+.update-bar { position: fixed; left: 12px; right: 12px; top: calc(var(--safe-t) + 58px); z-index: 95; display: flex; align-items: center; gap: 8px;
+  background: var(--card); color: var(--text); border: 1.5px solid var(--accent); border-radius: 14px; padding: 8px 8px 8px 14px; box-shadow: var(--shadow); font-size: 14px; font-weight: 600; max-width: 616px; margin: 0 auto; }
 .toast.ok { background: var(--ok); }
 .backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,0); transition: background .25s; display: flex; align-items: flex-end; justify-content: center; }
 .backdrop.show { background: rgba(0,0,0,.36); }
@@ -368,6 +371,7 @@ details.help summary { font-weight: 600; cursor: pointer; font-size: 14.5px; }
 .mcard .mbody { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 6px; }
 .status-line { font-size: 13.5px; margin: 8px 0; white-space: pre-wrap; }
 .status-line.ok { color: var(--ok); }
+.about-line.ok { color: var(--ok); } .about-line.bad { color: var(--bad); }
 .status-line.bad { color: var(--bad); }
 .kv { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
 .kv:first-child { border-top: 0; }
@@ -588,8 +592,6 @@ main.build-view { position: fixed; left: 0; right: 0; bottom: 0; top: calc(var(-
 .end-part .stepper .step { width: 40px; }
 
 /* ---- 核对拼豆板 ---- */
-.bd-review { position: absolute; left: 10px; right: 10px; top: 10px; display: flex; align-items: center; gap: 8px; background: var(--card); color: var(--text); border-radius: 14px; padding: 8px 6px 8px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.18); font-size: 14px; }
-.bd-review .tiny { color: var(--muted); margin-top: 1px; }
 .rv-head { margin: 0 2px 8px; min-height: 18px; }
 .rv-auto { background: var(--card-2); border-radius: 12px; padding: 10px 12px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .rv-card { display: flex; gap: 14px; align-items: center; margin-bottom: 12px; }
@@ -682,9 +684,22 @@ main.build-view { position: fixed; left: 0; right: 0; bottom: 0; top: calc(var(-
 /* 高亮当前颜色的开关（和镜像并排）；窄屏只显示图标 */
 .bd-zoom .bd-spot.on { background: var(--accent); }
 @media (max-width: 370px) { .bd-zoom .t { display: none; } }
-/* 识别网格：没对上清单色块的颜色，点色号再到图上点色块 */
-.su-miss { margin-top: 10px; border: 1.5px dashed var(--warn); }
-.su-miss-code { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 64px; }
-/* 识别网格：逐格读色号 */
+/* 准备拼豆板 → 颜色：每种颜色 拼豆板 / 清单，没把握的地方（读色号、核对、点色块） */
+.su-colors { margin-top: 4px; }
+.su-off { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.su-crow { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 10px; background: var(--card-2); }
+.su-crow.big { background: var(--warn-soft); }
+.warn-t { color: var(--warn); font-weight: 650; }
+.su-same { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.su-done { background: var(--card); border-radius: 14px; padding: 10px 14px; margin-top: 10px; align-items: center; }
+.su-review { margin-top: 10px; }
+.su-busy { position: fixed; left: 50%; top: 45%; transform: translate(-50%, -50%); z-index: 90; display: flex; align-items: center; gap: 10px; background: var(--card); color: var(--text); padding: 14px 18px; border-radius: 14px; box-shadow: var(--shadow); }
+.su-busy .spinner { width: 22px; height: 22px; margin: 0; }
+/* 准备拼豆板：“下一步”固定在屏幕底部（拼豆时底栏隐藏，贴底） */
+body.mode-build .sticky-actions { bottom: 0; padding-bottom: calc(var(--safe-b) + 10px); }
+.su-foot { margin-top: 12px; }
+/* 逐格读色号 */
 .su-ocr { margin-top: 10px; }
-.su-ocr-status { margin-top: 6px; color: var(--muted); min-height: 1.2em; }
+.su-ocr-status { margin-top: 6px; color: var(--muted); }
+.su-ocr-status:empty { display: none; }
+.su-done .link { white-space: nowrap; flex-shrink: 0; margin-left: 10px; }

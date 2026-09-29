@@ -1,12 +1,13 @@
 // Service Worker：把应用文件缓存到手机上，没网也能打开（云端大模型识别仍需联网）。
-// 每次发布新版本时把 VERSION 改一下，手机会在下次打开时更新。
-const VERSION = 'pindou-v2.6.0';
+// 每次发布新版本时把 VERSION 改一下（和 js/version.js 的 APP_VERSION 一致），手机打开 App 时会自动换成新版本。
+const VERSION = 'pindou-v2.6.1';
 const SHELL = [
   './',
   './index.html',
   './manifest.webmanifest',
   './css/app.css',
   './js/app.js',
+  './js/version.js',
   './js/db.js',
   './js/store.js',
   './js/palette.js',
@@ -41,8 +42,10 @@ const SHELL = [
   './icons/apple-touch-icon.png',
 ];
 
+// 装新版本：绕过浏览器的 HTTP 缓存直接从网站拿（GitHub Pages 让浏览器把文件缓存 10 分钟，
+// 不绕过的话新版本的缓存里装的可能还是旧文件，手机就一直是旧版本）
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 // 识别引擎和模型（几 MB 到十几 MB）单独放一个缓存：第一次用到时下载，之后一直用缓存，
@@ -73,19 +76,14 @@ self.addEventListener('fetch', e => {
     }));
     return;
   }
-  // 应用文件：先用缓存，同时在后台更新；OCR 引擎等大文件第一次用到时缓存
+  // 应用文件：只用这个版本装好的那一份（同一个版本的文件是一起装的，不会新旧混着用）；
+  // 缓存里没有的（没列在 SHELL 里）才去网站拿
   e.respondWith(
     caches.open(VERSION).then(async cache => {
       const cached = await cache.match(req, { ignoreSearch: true });
-      const network = fetch(req).then(res => {
-        if (res.ok && res.type === 'basic') cache.put(req, res.clone());
-        return res;
-      }).catch(() => null);
-      if (cached) {
-        e.waitUntil(network);
-        return cached;
-      }
-      const res = await network;
+      if (cached) return cached;
+      const res = await fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' }).catch(() => null);
+      if (res?.ok && res.type === 'basic') { cache.put(req, res.clone()); return res; }
       if (res) return res;
       if (req.mode === 'navigate') return cache.match('./index.html');
       return new Response('离线状态下无法获取：' + url.pathname, { status: 503 });

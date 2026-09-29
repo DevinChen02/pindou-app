@@ -1,8 +1,9 @@
-// 开始拼豆前的设置（生成拼豆板之前）：
-//   ① 框出拼豆板在原图上的位置 → ② 识别网格，算出图纸尺寸（行列数、有豆子的范围）
-//   → ③ 选自己用的拼豆板尺寸（输入，或点选存好的常用尺寸；放不下整幅图的不能选）
-//   → ④ 把豆子整体上下左右平移摆好（不能超出拼豆板）
-import { h, clear, toast, sheet, fmtNum, chip } from '../ui.js';
+// 开始拼豆前的设置（生成拼豆板之前），每一步一页、页面短，“下一步”一直在屏幕底部：
+//   ① 框出拼豆板在原图上的位置 → ② 网格：看格线对没对齐，算出图纸尺寸（行列数、有豆子的范围）
+//   → ③ 颜色：每种颜色的格数和清单对一对，没把握的地方在这里读色号 / 核对几格 / 点色块
+//   → ④ 选自己用的拼豆板尺寸（输入，或点选存好的常用尺寸；放不下整幅图的不能选）
+//   → ⑤ 把豆子整体上下左右平移摆好（不能超出拼豆板）
+import { h, clear, toast, sheet, fmtNum, chip, confirmDialog } from '../ui.js';
 import * as store from '../store.js';
 import { cropper } from '../cropper.js';
 import { swatchCandidates } from '../image.js';
@@ -12,12 +13,12 @@ import { gridFromCorners, boardRecord, locksFor, unpackCells } from '../board.js
 import { runBoard } from '../boardasync.js';
 import { createPanZoom } from '../panzoom.js';
 import { openImageViewer, entriesFromImages } from '../viewer.js';
-import { loadPixels, gridRegion, drawBoard, boardSize, merged } from './build.js';
+import { loadPixels, gridRegion, drawBoard, boardSize, merged, reviewFlow, reviewCount } from './build.js';
 import { goPattern } from './patterns.js';
 
 export const DEFAULT_PEGBOARDS = [[52, 52], [78, 78], [104, 104]];
 
-const st = { pid: null, active: false, showClean: false, clean: null, step: 'frame', im: null, pix: null, frame: null, guess: null, board: null, gridError: null, W: 0, H: 0, ox: 0, oy: 0, busy: false };
+const st = { pid: null, active: false, clean: null, step: 'frame', im: null, pix: null, frame: null, guess: null, board: null, gridError: null, W: 0, H: 0, ox: 0, oy: 0, busy: false };
 
 /** 有豆子的范围（行列都从 0 数）。一颗都没有时就是整张网格 */
 export function beadBox(board) {
@@ -52,19 +53,21 @@ const endSetup = () => { st.pid = null; st.active = false; st.pix = null; };
 
 /** 从拼豆页进来：从某一步开始（'frame' 重新框选，'peg' 换尺寸/调位置）。redo：框不动也重新识别一遍网格 */
 export function startSetup(p, step = 'frame', redo = false) {
-  Object.assign(st, { pid: p.id, active: true, step, redo, im: null, pix: null, frame: null, guess: null, board: step === 'frame' ? null : p.board, gridError: null, busy: false, showClean: false, clean: null });
+  Object.assign(st, { pid: p.id, active: true, step, redo, im: null, pix: null, frame: null, guess: null, board: step === 'frame' ? null : p.board, gridError: null, busy: false, clean: null, askedReview: false });
   // 之前摆过：记住拼豆板尺寸和位置（换尺寸页会高亮，原尺寸再选一次位置不变）
   if (p.board?.place) Object.assign(st, { W: p.board.place.W, H: p.board.place.H, ox: p.board.place.ox, oy: p.board.place.oy });
   else Object.assign(st, { W: 0, H: 0, ox: 0, oy: 0 });
 }
+
+const STEPS = [['frame', '框选'], ['grid', '网格'], ['colors', '颜色'], ['peg', '尺寸'], ['place', '摆放']];
 
 export async function renderSetup(app, p) {
   if (st.pid !== p.id) startSetup(p, 'frame');
   const view = clear(app.view);
   view.classList.toggle('build-view', st.step === 'place');
   document.body.classList.toggle('mode-board', st.step === 'place');
-  app.setTitle(['frame', 'grid'].includes(st.step) ? '准备拼豆板' : st.step === 'peg' ? '选拼豆板尺寸' : '摆好位置');
-  const steps = ['frame', 'grid', 'peg', 'place'];
+  app.setTitle(['frame', 'grid', 'colors'].includes(st.step) ? '准备拼豆板' : st.step === 'peg' ? '选拼豆板尺寸' : '摆好位置');
+  const steps = STEPS.map(x => x[0]);
   const back = () => {
     const i = steps.indexOf(st.step);
     // 从拼豆页“换尺寸”进来的，往回退到头就回拼豆页
@@ -82,15 +85,18 @@ export async function renderSetup(app, p) {
   if (st.step !== 'place') view.append(stepper(st.step));
   if (st.step === 'frame') return frameStep(app, p, view);
   if (st.step === 'grid') return gridStep(app, p, view);
+  if (st.step === 'colors') return colorsStep(app, p, view);
   if (st.step === 'peg') return pegStep(app, p, view);
   return placeStep(app, p, view);
 }
 
 function stepper(cur) {
-  const names = [['frame', '框出拼豆板'], ['grid', '识别网格'], ['peg', '拼豆板尺寸'], ['place', '摆放']];
-  const i = names.findIndex(n => n[0] === cur);
-  return h('div.su-steps', names.map(([k, label], j) => h('span' + (j === i ? '.on' : j < i ? '.done' : ''), `${j + 1} ${label}`)));
+  const i = STEPS.findIndex(n => n[0] === cur);
+  return h('div.su-steps', STEPS.map(([k, label], j) => h('span' + (j === i ? '.on' : j < i ? '.done' : ''), `${j + 1} ${label}`)));
 }
+
+/** 每一步底部固定的按钮（不用滑到最下面才找得到“下一步”） */
+const footer = (...els) => h('div.sticky-actions.su-foot', els);
 
 async function ensurePixels(p) {
   if (st.pix) return;
@@ -127,15 +133,18 @@ async function frameStep(app, p, view) {
     wait.remove();
   }
   const work = { canvas: st.pix.canvas, content: { x: 0, y: 0, w: st.pix.canvas.width, h: st.pix.canvas.height }, rect: st.frame };
-  const cr = cropper(work, { maxVh: 60 });
+  const cr = cropper(work, { maxVh: 55 });
   view.append(
-    h('p.small.muted', '先把', h('b', '整块拼豆板（所有格子）'), '框在方框里，别框进清单和编号栏也没关系——下一步会在框里自动找格线。拖角调大小，拖中间移动，框外空白处可以重画。'),
+    h('p.small.muted', '把', h('b', '整块拼豆板（所有格子）'), '框在方框里，框进清单和编号栏也没关系。拖角调大小，拖中间移动。'),
     cr.el,
     h('div.row.gap', { style: { marginTop: '6px' } },
       h('button.btn.soft.sm', { onclick: () => { st.frame = { ...work.content }; app.rerender(); } }, '整张图'),
-      st.guess ? h('button.btn.soft.sm', { onclick: () => { st.frame = st.guess; app.rerender(); } }, '重置') : null),
-    h('div.spacer'),
-    h('button.btn.primary.block.big', {
+      st.guess ? h('button.btn.soft.sm', { onclick: () => { st.frame = st.guess; app.rerender(); } }, '重置') : null,
+      h('span.grow'),
+      h('button.link.small', {
+        onclick: async () => { await store.patchPattern(p.id, { boardSkip: true }); endSetup(); app.rerender(); },
+      }, '不用拼豆板 ›')),
+    footer(h('button.btn.primary.block.big', {
       onclick: () => {
         const f = cr.get();
         const moved = !st.guess || ['x', 'y', 'w', 'h'].some(k => Math.abs(f[k] - st.guess[k]) > 3);
@@ -143,87 +152,204 @@ async function frameStep(app, p, view) {
         if (moved) st.board = null; // 框变了：重新找网格
         st.step = 'grid'; app.rerender();
       },
-    }, '下一步：识别网格'),
-    h('div.center', { style: { marginTop: '10px' } }, h('button.link.small', {
-      onclick: async () => { await store.patchPattern(p.id, { boardSkip: true }); endSetup(); app.rerender(); },
-    }, '不用拼豆板，只按颜色打勾 ›')));
+    }, '下一步：识别网格')));
 }
 
-// ---------- ② 识别网格 ----------
+
+/** 按框（和设置里的去水印开关）找网格、认颜色。刚识别过的直接用 */
+async function ensureBoard(app, p, view) {
+  if (st.board || st.gridError) return true;
+  const wait = h('div.bd-wait', h('div.spinner'), h('p', h('b', '正在识别网格…')), h('p.small.muted', '找格线、认颜色、读格子里印的色号'));
+  view.append(wait);
+  const step = st.step;
+  try {
+    await ensurePixels(p);
+    const W = st.pix.canvas.width, H = st.pix.canvas.height, f = st.frame || gridRegion(st.im, st.pix.canvas);
+    const m = Math.max(W, H) * 0.02;
+    const region = { x: Math.max(0, f.x - m), y: Math.max(0, f.y - m), w: Math.min(W, f.x + f.w + m) - Math.max(0, f.x - m), h: Math.min(H, f.y + f.h + m) - Math.max(0, f.y - m) };
+    const keep = p.board?.locks?.length && p.board.imageId === st.im.fullId ? p.board : null;
+    const refs = merged(p);
+    const dewatermark = app.settings.dewatermark !== false;
+    let res = await runBoard('digitize', st.pix.data, { region, refs, locks: keep ? locksFor(keep, refs) : null, dewatermark });
+    if (!res.error && keep && (res.rows !== keep.rows || res.cols !== keep.cols)) res = await runBoard('digitize', st.pix.data, { region, refs, dewatermark });
+    if (res.error) st.gridError = res.error;
+    else st.board = boardRecord(res, st.im.fullId, { auto: true, dewatermark }, keep && res.rows === keep.rows && res.cols === keep.cols ? locksFor(keep, refs) : null);
+  } catch (e) { st.gridError = e.message; }
+  wait.remove();
+  return app.pat.page === 'build' && st.step === step;
+}
+
+// ---------- ② 网格：格线对齐了没有 ----------
 
 async function gridStep(app, p, view) {
-  if (!st.board && !st.gridError) {
-    const wait = h('div.bd-wait', h('div.spinner'), h('p', h('b', '正在识别网格…')), h('p.small.muted', '找格线、认颜色、读格子里印的色号'));
-    view.append(wait);
-    try {
-      await ensurePixels(p);
-      const W = st.pix.canvas.width, H = st.pix.canvas.height, f = st.frame;
-      const m = Math.max(W, H) * 0.02;
-      const region = { x: Math.max(0, f.x - m), y: Math.max(0, f.y - m), w: Math.min(W, f.x + f.w + m) - Math.max(0, f.x - m), h: Math.min(H, f.y + f.h + m) - Math.max(0, f.y - m) };
-      const keep = p.board?.locks?.length && p.board.imageId === st.im.fullId ? p.board : null;
-      const refs = merged(p);
-      const dewatermark = app.settings.dewatermark !== false;
-      let res = await runBoard('digitize', st.pix.data, { region, refs, locks: keep ? locksFor(keep, refs) : null, dewatermark });
-      if (!res.error && keep && (res.rows !== keep.rows || res.cols !== keep.cols)) res = await runBoard('digitize', st.pix.data, { region, refs, dewatermark });
-      if (res.error) st.gridError = res.error;
-      else st.board = boardRecord(res, st.im.fullId, { auto: true, dewatermark }, keep && res.rows === keep.rows && res.cols === keep.cols ? locksFor(keep, refs) : null);
-    } catch (e) { st.gridError = e.message; }
-    wait.remove();
-    if (app.pat.page !== 'build' || st.step !== 'grid') return;
-  }
+  if (!(await ensureBoard(app, p, view))) return;
   const refs = merged(p);
   const want = refs.reduce((a, r) => a + r.count, 0);
-  if (st.pendingSwatch && st.board) {
-    const c = st.pendingSwatch; st.pendingSwatch = null;
-    if ((st.board.stats?.legendUsed || []).includes(c)) toast(`${c} 已按你点的颜色重新识别`, 'ok');
-    else toast(`图纸格子里找不到一批和你点的一样的颜色，${c} 还是按色卡色认。换个地方（色块中间、别点到字）再点一次`, 'error');
-  }
   if (st.gridError && !st.board) {
     view.append(h('div.banner.bad', h('span.ico', '⚠️'), h('div', h('b', '框里没找到网格'), h('div.small', `${st.gridError}。没有格线的图纸（比如只有色块和棋盘格底纹）需要手动告诉我有几行几列。`))));
   } else {
     const b = beadBox(st.board);
     const beads = st.board.stats?.beads ?? b.n;
-    const dw = app.settings.dewatermark !== false;
-    view.append(gridPreview(dw && st.showClean && st.board ? cleanCanvas(app, st.board) : st.pix?.canvas, st.board));
-    view.append(h('label.su-dw',
-      h('input', { type: 'checkbox', checked: dw, onchange: async e => { app.settings.dewatermark = e.target.checked; await store.saveSettings(app.settings); st.board = null; st.gridError = null; st.clean = null; app.rerender(); } }),
-      h('div.grow', h('b', '去水印'), h('div.tiny.muted', '同一色号的格子本来一模一样，拿它们互相比，被水印、半透明文字盖住的像素不参与认颜色。')),
-      dw ? h('button.btn.sm.soft', { onclick: e => { e.preventDefault(); st.showClean = !st.showClean; app.rerender(); } }, st.showClean ? (st.clean?.canvas ? '看原图' : '正在去水印…') : '看去水印后') : null));
+    view.append(gridPreview(st.pix?.canvas, st.board));
+    view.append(h('p.small.muted.center', { style: { margin: '6px 0 0' } }, '红线每 5 格一条，看看是不是和格子对齐（点图放大看）'));
     view.append(h('div.card.su-sum',
       h('div.row.between', h('span.small.muted', '图纸网格'), h('b', `${st.board.cols} 列 × ${st.board.rows} 行`)),
       h('div.row.between', h('span.small.muted', '有豆子的范围'), h('b', `${b.w} 列 × ${b.h} 行`)),
-      h('div.row.between', h('span.small.muted', '豆子'), h('b', `${fmtNum(beads)} 颗`, want ? h('span.small.muted', `（清单 ${fmtNum(want)}）`) : null)),
-      // 有几种颜色是按清单色块在图上的实际颜色认的（其余按色卡标准色 + 校准）
-      h('div.row.between.su-legend', h('span.small.muted', '按清单色块的颜色认'), h('b', `${(st.board.stats?.legendUsed || []).length} / ${refs.length} 种`)),
-      st.board.ocrRead ? h('div.row.between.su-ocr-done', h('span.small.muted', '逐格读了色号'), h('b', `${fmtNum(st.board.ocrRead)} 格 ✓`)) : null));
-    // 没对上清单色块的颜色：只能按色卡标准色认，容易认错——让用户在图上点它的色块，再重新识别
-    const used = new Set(st.board.stats?.legendUsed || []);
-    const missing = refs.filter(r => !used.has(r.code));
-    if (missing.length) {
-      view.append(h('div.card.su-miss',
-        h('div', h('b', `${missing.length} 种颜色还没对上清单色块`)),
-        h('div.small.muted', { style: { margin: '2px 0 8px' } }, '这几种只能按色卡标准色认，出图软件的颜色和色卡差得多时容易认错。点一下色号，再在图上点它的色块（清单里的那个色块，或者图纸上任意一颗这个颜色的豆子），会重新识别。'),
-        h('div.row.wrap.gap-s', missing.map(r => h('button.code-cell.su-miss-code', { 'data-code': r.code, onclick: () => pickSwatch(app, p, r.code) },
-          chip(r.code, { size: 'sm' }), h('span.tiny.muted', r.swatchSure ? '点的颜色没对上' : r.swatch ? '取色没对上' : '没取到色'))))));
-    }
-    // 颜色很接近 / 和色卡差得多的几种：只看颜色容易整种认反 → 可以让识字模型把这些格子上印的色号逐格读出来
-    const riskCodes = new Set();
-    for (const r of st.board.review?.risks || []) { riskCodes.add(r.code); for (const pc of r.partners || []) riskCodes.add(pc); }
-    const bcells = unpackCells(st.board.cells);
-    const ocrIdx = [];
-    for (let i = 0; i < bcells.length; i++) if (bcells[i] && riskCodes.has(st.board.codes[bcells[i] - 1])) ocrIdx.push(i);
-    if (ocrIdx.length && !st.board.ocrRead) view.append(ocrCard(app, p, ocrIdx, [...riskCodes]));
+      h('div.row.between', h('span.small.muted', '豆子'), h('b', `${fmtNum(beads)} 颗`, want ? h('span.small.muted', `（清单 ${fmtNum(want)}）`) : null))));
     if (want && Math.abs(beads - want) > Math.max(3, want * 0.03)) {
-      view.append(h('div.banner.warn', h('span.ico', '⚠️'), h('div', h('b', '颗数和清单差得比较多'), h('div.small', '看看上面红框是不是正好框住了所有格子；不对的话点“行列数不对”手动校准。'))));
+      view.append(h('div.banner.warn', h('span.ico', '⚠️'), h('div', h('b', '颗数和清单差得比较多'), h('div.small', '看看红线是不是正好框住了所有格子；不对的话“手动校准”。'))));
     }
-    view.append(h('p.small.muted', '红线是每 5 格一条的格线，对一下是不是和原图的格子对齐。'));
   }
   view.append(
     h('div.row.gap.wrap', { style: { marginTop: '8px' } },
       h('button.btn.soft', { onclick: () => manualGrid(app, p) }, st.board ? '行列数不对？手动校准' : '📐 手动填行列数'),
       h('button.btn.ghost', { onclick: () => { st.step = 'frame'; app.rerender(); } }, '重新框选')),
-    h('div.spacer'),
-    st.board ? h('button.btn.primary.block.big', { onclick: () => { st.step = 'peg'; app.rerender(); } }, '对，下一步：选拼豆板尺寸') : null);
+    st.board ? footer(h('button.btn.primary.block.big', { onclick: () => { st.step = 'colors'; app.rerender(); } }, '网格对了，下一步：核对颜色')) : null);
+}
+
+// ---------- ③ 颜色：每种颜色的格数和清单对一对，没把握的地方在这里解决 ----------
+
+/** 每种颜色在拼豆板上几格 */
+function boardCounts(board) {
+  const cells = unpackCells(board.cells), cnt = new Map();
+  for (const v of cells) if (v) cnt.set(board.codes[v - 1], (cnt.get(board.codes[v - 1]) || 0) + 1);
+  return cnt;
+}
+/** 只看颜色容易认混的色号（和别的色号颜色很近 / 图上颜色和色卡差得多） */
+function riskCodesOf(board) {
+  const out = new Set();
+  for (const r of board.review?.risks || []) { out.add(r.code); for (const pc of r.partners || []) out.add(pc); }
+  return out;
+}
+
+async function colorsStep(app, p, view) {
+  if (st.pendingSwatch && st.board) {
+    const c = st.pendingSwatch; st.pendingSwatch = null;
+    if ((st.board.stats?.legendUsed || []).includes(c)) toast(`${c} 已按你点的颜色重新识别`, 'ok');
+    else toast(`图纸格子里找不到一批和你点的一样的颜色，${c} 还是按色卡色认。换个地方（色块中间、别点到字）再点一次`, 'error');
+  }
+  if (!(await ensureBoard(app, p, view))) return;
+  if (!st.board) { st.step = 'grid'; return app.rerender(); }
+  const board = st.board;
+  const refs = merged(p);
+  const cnt = boardCounts(board);
+  const risk = riskCodesOf(board);
+  const used = new Set(board.stats?.legendUsed || []);
+  const rows = refs.map(r => ({ ...r, got: cnt.get(r.code) || 0 })).map(r => ({ ...r, d: r.got - r.count, big: Math.abs(r.got - r.count) > Math.max(2, r.count * 0.03) }));
+  // 需要在图上点色块的：清单色块的颜色没用上（只能按色卡标准色认），而且真的可能认错——
+  // 格数和清单差得多，或者图上这种颜色和色卡差得多（可能和别的色号整种认反；逐格读过色号的就不用了）。
+  // 别的不提示：按色卡色也认对了，提示反而让人以为出错
+  const drift = new Set((board.review?.risks || []).filter(r => r.drift || r.reason === 'drift').map(r => r.code));
+  const needSwatch = r => !used.has(r.code) && (r.big || (drift.has(r.code) && !board.ocrRead));
+  // 要看一眼的颜色：格数对不上的 + 要点色块的；其余的只列出色块
+  const off = rows.filter(r => r.d || needSwatch(r)).sort((a, b) => (needSwatch(b) - needSwatch(a)) || Math.abs(b.d) - Math.abs(a.d));
+  const same = rows.filter(r => !off.includes(r));
+
+  // 颜色很接近 / 和色卡差得多的几种：逐格读印的色号（最准，先推荐这个）
+  // （锁定的格子——核对过、改过、以前读字读得准的——不用再读）
+  const bcells = unpackCells(board.cells);
+  const locked = new Set((board.locks || []).map(([i]) => i));
+  const ocrIdx = [];
+  for (let i = 0; i < bcells.length; i++) if (bcells[i] && !locked.has(i) && risk.has(board.codes[bcells[i] - 1])) ocrIdx.push(i);
+  const ocrTodo = !board.ocrRead && ocrIdx.length > 0;
+  if (ocrTodo) view.append(ocrCard(app, p, ocrIdx, [...risk]));
+  else if (board.ocrRead) view.append(h('div.row.between.su-done.su-ocr-done', h('span.small', '🔍 逐格读了色号'), h('b.small', `${fmtNum(board.ocrRead)} 格 ✓`)));
+
+  // 没把握的格子 / 相近色：看放大图回答几个问题（确认几格就能把整板纠正过来）
+  const nReview = reviewCount(board);
+  if (board.reviewedAt) view.append(h('div.row.between.su-done.su-review-done', h('span.small', '🙋 已核对 ✓'), h('button.link.small', { onclick: () => startReview(app, p) }, '再核对一次')));
+  else if (nReview && ocrTodo) {
+    view.append(h('div.row.between.su-done.su-review', h('span.small.muted', `也可以自己核对（${nReview} 处）；先读色号的话，要核对的会少很多`), h('button.link.small.su-review-go', { onclick: () => startReview(app, p) }, '核对')));
+  } else if (nReview) {
+    const rv = board.review;
+    const nr = rv.risks.filter(r => r.probe?.length).length, nu = rv.uncertain.length;
+    view.append(h('div.card.su-review',
+      h('div', h('b', `🙋 核对一下（${nReview} 处）`)),
+      h('div.small.muted', { style: { margin: '2px 0 8px' } }, [nr ? `${nr} 种颜色很接近` : '', nu ? `${nu} 个格子没把握` : ''].filter(Boolean).join('、') + '。看放大图回答几个问题，确认几格就能把整板纠正过来。'),
+      h('button.btn.soft.su-review-go', { onclick: () => startReview(app, p) }, '开始核对')));
+  }
+  if (!off.length && !ocrTodo && !nReview) view.append(h('div.banner.ok.su-allok', h('span.ico', '✓'), h('div.small', '颜色都认好了，没有没把握的地方')));
+
+  // 每种颜色：拼豆板上几格 / 清单几颗
+  view.append(h('div.card.su-colors',
+    h('div.row.between', h('b', '每种颜色：拼豆板 / 清单'), h('span.small.muted', `${refs.length} 种`)),
+    off.length ? h('div.su-off', off.map(r => h('div.su-crow' + (r.big || needSwatch(r) ? '.big' : ''), { 'data-code': r.code },
+      chip(r.code, { size: 'sm' }),
+      h('div.grow', h('div.small', `板上 ${fmtNum(r.got)} · 清单 ${fmtNum(r.count)}`),
+        h('div.tiny' + (r.big || needSwatch(r) ? '.warn-t' : '.muted'), r.d > 0 ? `多 ${r.d} 格` : r.d < 0 ? `少 ${-r.d} 格` : '没取到清单色块的颜色，图上颜色又和色卡差得多：可能认对了，也可能和别的颜色认反')),
+      needSwatch(r) ? h('button.btn.sm.soft.su-miss-code', { 'data-code': r.code, onclick: () => pickSwatch(app, p, r.code) }, '点色块') : null))) : null,
+    same.length ? h('div.su-same', h('div.tiny.muted', (off.length ? `其余 ${same.length} 种格数一致` : '格数都和清单一致') + (ocrTodo ? '（很接近的几种格数一致也可能互相认混，见上面）' : '')),
+      h('div.row.wrap.gap-s', same.map(r => h('span.su-okc', { 'data-code': r.code }, chip(r.code, { size: 'sm' }))))) : null,
+    rows.some(needSwatch) ? h('div.tiny.muted', { style: { marginTop: '6px' } }, '想确认的话：逐格读色号（上面，最准），或者点“点色块”，再在图上点它的色块（清单里的色块或者一颗这个颜色的豆子），会按你点的颜色重新认。') : null));
+
+  // 去水印（默认开）
+  const dw = app.settings.dewatermark !== false;
+  view.append(h('label.su-dw',
+    h('input', {
+      type: 'checkbox', checked: dw,
+      onchange: async e => {
+        app.settings.dewatermark = e.target.checked; await store.saveSettings(app.settings);
+        await reclassify(app, p); app.rerender();
+      },
+    }),
+    h('div.grow', h('b', '去水印'), h('div.tiny.muted', '被水印、半透明文字盖住的格子也认得准')),
+    dw ? h('button.btn.sm.soft', { onclick: e => { e.preventDefault(); showClean(app, p); } }, '看效果') : null));
+
+  view.append(footer(h('button.btn.primary.block.big', {
+    onclick: async () => {
+      // 还有没把握的地方：在选拼豆板尺寸之前问一次
+      if (!st.askedReview && (ocrTodo || (nReview && !board.reviewedAt))) {
+        st.askedReview = true;
+        const go = ocrTodo
+          ? await confirmDialog(`${[...risk].join('、')} 颜色很接近，可能认混。先逐格读色号吗？`, { ok: '先读色号', cancel: '不读，下一步', detail: '读格子上印的色号，和颜色一起判断，最准。以后想重新识别：拼豆页“⋯ → 重新框选拼豆板 / 重新识别”。' })
+          : await confirmDialog(`还有 ${nReview} 处没把握，先核对一下吗？`, { ok: '先核对', cancel: '不核对，下一步', detail: '看放大图回答几个问题，一般一两分钟。以后在拼豆页的“⋯ → 核对拼豆板”里也能做。' });
+        if (go) { if (ocrTodo) document.querySelector('.su-ocr-go')?.click(); else startReview(app, p); return; }
+      }
+      st.step = 'peg'; app.rerender();
+    },
+  }, '下一步：选拼豆板尺寸')));
+}
+
+/** 在设置里核对：核对完直接换成新的拼豆板（还没存，到“完成，开始拼豆”才存） */
+function startReview(app, p) {
+  const board = st.board;
+  reviewFlow(app, p, {
+    board,
+    onDone: rec => { if (st.board === board && app.pat.page === 'build') { st.board = { ...rec, ocrRead: board.ocrRead || 0 }; st.clean = null; app.rerender(); } },
+  });
+}
+
+/** 网格不变，重新认颜色（换了去水印开关、点了色块之后）。锁定的格子（核对过的、读字读得准的）照旧 */
+async function reclassify(app, p) {
+  const board = st.board;
+  const busy = h('div.su-busy', h('div.spinner'), h('span.small', '正在重新认颜色…'));
+  document.body.appendChild(busy);
+  try {
+    await ensurePixels(p);
+    const refs = merged(p);
+    const { xs, ys } = board.geom;
+    const locks = locksFor(board, refs);
+    const dewatermark = app.settings.dewatermark !== false;
+    const res = await runBoard('classify', st.pix.data, { xs, ys, refs, opt: { locks, dewatermark } });
+    res.rows = board.rows; res.cols = board.cols;
+    if (st.board !== board) return;
+    st.board = boardRecord({ ...res, geom: { xs, ys } }, board.imageId, { auto: board.auto, manual: board.manual, dewatermark, ocrRead: board.ocrRead || 0 }, locks);
+    st.clean = null;
+  } catch (e) { toast(e.message, 'error'); }
+  busy.remove();
+}
+
+/** 去水印前后对比（全屏看图：原图 / 去水印后 两个视图） */
+async function showClean(app, p) {
+  const board = st.board;
+  toast('正在去水印…');
+  try { await ensurePixels(p); } catch (e) { toast(e.message, 'error'); return; }
+  const cv = await cleanCanvas(board);
+  if (!cv || st.board !== board) return;
+  const [e] = entriesFromImages([st.im]);
+  e.name = '去水印效果';
+  e.views = [...e.views.filter(v => v.key === 'full'), { key: 'clean', label: '去水印后', src: cv.toDataURL('image/jpeg', 0.92), w: cv.width, h: cv.height }];
+  openImageViewer([e], { view: 'clean', focus: false });
 }
 
 /** 逐格读色号：读完和颜色一起重新归类（不改网格） */
@@ -256,10 +382,19 @@ function ocrCard(app, p, idx, codes) {
         });
         if (!done) { status.textContent = '没有读'; go.disabled = false; stopBtn.hidden = true; return; }
         status.textContent = '按读到的色号和颜色一起重新归类…';
-        const keep = p.board?.locks?.length && p.board.imageId === st.im.fullId && p.board.rows === board.rows && p.board.cols === board.cols ? p.board : null;
-        const locks = keep ? locksFor(keep, refs) : null;
-        const res = await runBoard('classify', st.pix.data, { xs, ys, refs, opt: { locks, dewatermark: !!board.dewatermark, ocr: { scores, w: 8, early: true } } });
+        const locks = locksFor(board, refs) || new Map();
+        const res = await runBoard('classify', st.pix.data, { xs, ys, refs, opt: { locks: locks.size ? locks : null, dewatermark: !!board.dewatermark, ocr: { scores, w: 8, early: true } } });
         res.rows = board.rows; res.cols = board.cols;
+        // 读得有把握、又和最后结果一致的格子锁定：以后核对、重新计算都照旧（读字的结果不会被冲掉）
+        for (const i of idx) {
+          const sc = scores[i];
+          if (!sc || locks.has(i)) continue;
+          let a = 0; for (let k = 1; k < sc.length; k++) if (sc[k] > sc[a]) a = k;
+          let b2 = -Infinity; for (let k = 0; k < sc.length; k++) if (k !== a && sc[k] > b2) b2 = sc[k];
+          const code = a < lex.length ? lex[a] : '';
+          const fin = res.cells[i] ? res.codes[res.cells[i] - 1] : '';
+          if (sc[a] - b2 >= 3 && code === fin) locks.set(i, code ? refs.findIndex(r => r.code === code) + 1 : 0);
+        }
         const before = unpackCells(board.cells);
         let changed = 0;
         for (let i = 0; i < res.cells.length; i++) {
@@ -267,7 +402,7 @@ function ocrCard(app, p, idx, codes) {
           if (a !== b) changed++;
         }
         if (app.pat.page !== 'build' || st.board !== board) return; // 期间换了网格
-        st.board = boardRecord({ ...res, geom: { xs, ys } }, board.imageId, { auto: board.auto, manual: board.manual, dewatermark: !!board.dewatermark, ocrRead: done }, locks);
+        st.board = boardRecord({ ...res, geom: { xs, ys } }, board.imageId, { auto: board.auto, manual: board.manual, dewatermark: !!board.dewatermark, ocrRead: done }, locks.size ? locks : null);
         st.clean = null;
         toast(`读了 ${done} 格色号${changed ? `，${changed} 格改了颜色` : '，拼豆板没有变化'}`, 'ok');
         app.rerender();
@@ -277,18 +412,19 @@ function ocrCard(app, p, idx, codes) {
       }
     },
   }, '开始逐格读色号');
-  const dl = h('span');
-  downloadMB(model).then(mb => { dl.textContent = mb > 0 ? `第一次要下载约 ${Math.round(mb)} MB；` : ''; });
+  const meta = h('div.tiny.muted.su-ocr-model', { style: { margin: '-2px 0 8px' } });
+  const metaText = mb => meta.textContent = [`约 ${secs} 秒`, '可随时停止', mb > 0 ? `第一次要下载约 ${Math.round(mb)} MB` : '', `识字模型：${M.name}（设置里可换）`].filter(Boolean).join(' · ');
+  metaText(0);
+  downloadMB(model).then(metaText);
   return h('div.card.su-ocr',
-    h('div', h('b', '🔍 逐格读色号（更准，要等一会儿）')),
-    h('div.small.muted', { style: { margin: '2px 0 8px' } },
-      `${codes.join('、')} 这几种颜色很接近、或者和色卡差得多，只看颜色容易整种认反。用识字模型把这 ${fmtNum(idx.length)} 格上印的色号一格一格读出来，和颜色一起判断。`,
-      dl, `大约 ${secs} 秒，可以随时停止。`),
-    h('div.tiny.muted.su-ocr-model', { style: { margin: '-4px 0 8px' } }, `识字模型：${M.name}（${M.model}），可在 设置 → 识字模型 里换`),
+    h('div', h('b', '🔍 逐格读色号（推荐）')),
+    h('div.small.muted', { style: { margin: '2px 0 6px' } },
+      `${codes.join('、')} 颜色很接近（或者和色卡差得多），只看颜色容易认反。读这 ${fmtNum(idx.length)} 格上印的色号，和颜色一起判断。`),
+    meta,
     h('div.row.gap', go, stopBtn), status);
 }
 
-/** 在图上点某个色号的色块：取那一点周围的颜色，记到图纸清单里（用户点的，归类时优先信），再重新识别网格 */
+/** 在图上点某个色号的色块：取那一点周围的颜色，记到图纸清单里（用户点的，归类时优先信），网格不变、重新认颜色 */
 async function pickSwatch(app, p, code) {
   try { await ensurePixels(p); } catch (e) { toast(e.message, 'error'); return; }
   const hint = `在图上点 ${code} 的色块（清单里的色块，或者一颗 ${code} 豆子）`;
@@ -303,30 +439,27 @@ async function pickSwatch(app, p, code) {
       let cands = null;
       try { cands = swatchCandidates(st.pix.canvas, { x0: x - r, y0: y - r, x1: x + r, y1: y + r }, 0); } catch { cands = null; }
       if (!cands) { toast('没取到颜色，再点一次', 'error'); return; }
-      await store.patchPattern(p.id, pp => ({ ...pp, items: pp.items.map(it => (it.code === code ? { ...it, swatch: cands, swatchSure: true } : it)) }));
+      const np = await store.patchPattern(p.id, pp => ({ ...pp, items: pp.items.map(it => (it.code === code ? { ...it, swatch: cands, swatchSure: true } : it)) }));
+      await reclassify(app, np || await store.getPattern(p.id));
       st.pendingSwatch = code;
-      st.board = null; st.gridError = null; st.clean = null;
       app.rerender();
     },
   });
   toast(hint);
 }
 
-/** 去水印后的整张图（只给人看；在后台线程算，算好了缓存起来再刷新） */
-function cleanCanvas(app, board) {
+/** 去水印后的整张图（只给人看；在后台线程算，算好了缓存起来） */
+async function cleanCanvas(board) {
   if (st.clean?.board === board) return st.clean.canvas;
-  if (st.clean?.pending !== board) {
-    st.clean = { pending: board };
+  try {
     const g0 = board.geom;
-    runBoard('clean', st.pix.data, { xs: g0.xs, ys: g0.ys, cells: unpackCells(board.cells) }).then(out => {
-      const cv = document.createElement('canvas');
-      cv.width = out.width; cv.height = out.height;
-      cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(out.data), out.width, out.height), 0, 0);
-      st.clean = { board, canvas: cv };
-      if (st.step === 'grid' && st.board === board) app.rerender();
-    }, e => { st.clean = null; st.showClean = false; toast(e.message, 'error'); app.rerender(); });
-  }
-  return st.pix?.canvas;
+    const out = await runBoard('clean', st.pix.data, { xs: g0.xs, ys: g0.ys, cells: unpackCells(board.cells) });
+    const cv = document.createElement('canvas');
+    cv.width = out.width; cv.height = out.height;
+    cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(out.data), out.width, out.height), 0, 0);
+    st.clean = { board, canvas: cv };
+    return cv;
+  } catch (e) { toast(e.message, 'error'); return null; }
 }
 
 /** 原图上框出找到的网格（每 5 格一条红线），一眼看对没对齐 */
@@ -402,7 +535,7 @@ function pickCorner(im, hint, cb) {
   toast(hint);
 }
 
-// ---------- ③ 选拼豆板尺寸 ----------
+// ---------- ④ 选拼豆板尺寸 ----------
 
 async function pegStep(app, p, view) {
   const board = st.board;
@@ -447,7 +580,7 @@ async function pegStep(app, p, view) {
     h('button.btn.ghost.block', { onclick: () => { Object.assign(st, { W: board.cols, H: board.rows, ox: 0, oy: 0, step: 'place' }); app.rerender(); } }, `按图纸原来的格子（${board.cols} × ${board.rows}）`));
 }
 
-// ---------- ④ 摆放：整体上下左右平移 ----------
+// ---------- ⑤ 摆放：整体上下左右平移 ----------
 
 function placeStep(app, p, view) {
   const board = { ...st.board, cells: unpackCells(st.board.cells) };

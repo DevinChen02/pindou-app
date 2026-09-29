@@ -1,7 +1,7 @@
 // 离线 OCR：自研的分词 / 配对 + 文字识别引擎。识别引擎两种，都随应用部署、首次加载后可离线使用：
-//   高精度：PP-OCRv5 mobile（vendor/ppocr + vendor/ort，约 19 MB）——示例图上明显更准，默认
+//   PP-OCR：PP-OCRv5 mobile（vendor/ppocr + vendor/ort，约 19 MB）——示例图上明显更准，默认
 //   （读拼豆板格子上的色号另外可选 PP-OCRv6 small，见 REC_MODELS）
-//   轻量：  Tesseract（vendor/tesseract，约 7 MB）——高精度引擎加载失败时自动退回
+//   Tesseract：（vendor/tesseract，约 7 MB）——PP-OCR 加载失败时自动退回
 import { analyze, wordImage, pairWords, OCR_ATTEMPTS, plausibleToken, lengthMatches } from './ocr-core.js';
 import { normalizeCode, ocrWhitelist } from '../palette.js';
 import { getImageData, makeCanvas } from '../image.js';
@@ -124,12 +124,12 @@ function toCanvas(img) {
 export async function ocrExtract(settings, canvas, rect, { onStatus, signal } = {}) {
   let pp = null, worker = null, engine = settings.engine || 'ppocr';
   if (engine === 'ppocr') {
-    onStatus?.('加载高精度识别引擎（PP-OCRv5）…');
+    onStatus?.('加载识别引擎（PP-OCR）…');
     try {
-      pp = await getPP(m => { if (m.progress < 1) onStatus?.(`首次使用，下载高精度识别模型…${Math.round(m.progress * 100)}%`); });
+      pp = await getPP(m => { if (m.progress < 1) onStatus?.(`首次使用，下载识别模型…${Math.round(m.progress * 100)}%`); });
     } catch (e) {
       console.warn('PP-OCRv5 加载失败，改用 Tesseract', e);
-      onStatus?.('高精度引擎加载失败，改用轻量引擎…');
+      onStatus?.('PP-OCR 加载失败，改用 Tesseract…');
       engine = 'tesseract';
     }
   }
