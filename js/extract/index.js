@@ -28,8 +28,10 @@ function makeDisplay(canvas, rect, pad = 12) {
  */
 async function saveFullImage(work, disp) {
   const c = work.content;
-  // iPhone 截图（约 1320×2868）保持原尺寸：拼豆板要读每格里的小字，缩小了会读不准
-  const k = Math.min(1, 3000 / Math.max(c.w, c.h), Math.sqrt(6e6 / (c.w * c.h)));
+  // iPhone 截图（约 1320×2868）保持原尺寸：拼豆板要读每格里的小字，缩小了会读不准。
+  // 几张拼成的大图也尽量保持原大小（长边到 8192、总共 1200 万像素）
+  const k = work.merged ? Math.min(1, 8192 / Math.max(c.w, c.h), Math.sqrt(12e6 / (c.w * c.h)))
+    : Math.min(1, 3000 / Math.max(c.w, c.h), Math.sqrt(6e6 / (c.w * c.h)));
   const view = cropCanvas(work.canvas, c, k);
   const fullId = await putImage({ dataUrl: toDataURL(view, 0.9), w: view.width, h: view.height, name: work.name });
   return {

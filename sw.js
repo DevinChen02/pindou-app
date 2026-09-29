@@ -1,6 +1,6 @@
 // Service Worker：把应用文件缓存到手机上，没网也能打开（云端大模型识别仍需联网）。
 // 每次发布新版本时把 VERSION 改一下（和 js/version.js 的 APP_VERSION 一致），手机打开 App 时会自动换成新版本。
-const VERSION = 'pindou-v2.6.3';
+const VERSION = 'pindou-v2.6.4';
 const SHELL = [
   './',
   './index.html',
@@ -19,6 +19,8 @@ const SHELL = [
   './js/cells.js',
   './js/cropper.js',
   './js/ocrcells.js',
+  './js/stitch.js',
+  './js/merge.js',
   './js/views/boardsetup.js',
   './js/boardasync.js',
   './js/boardworker.js',

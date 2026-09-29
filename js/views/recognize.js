@@ -7,6 +7,8 @@ import { extractImage, extractText, referenceImage, statedFromImages, newId } fr
 import { renderVerify } from './verify.js';
 import { hasViewable } from '../viewer.js';
 import { renderPreview } from './preview.js';
+import { openImageViewer } from '../viewer.js';
+import { autoMerge, manualMerge } from '../merge.js';
 
 const METHOD_TIPS = {
   vlm: '把截图发给云端大模型读取清单。版式再怪也能读，需联网、按次计费。',
@@ -18,6 +20,7 @@ export async function renderRecognize(app) {
   const r = app.rec;
   if (r.step === 'verify') return renderVerify(app);
   if (r.step === 'preview') return renderPreview(app);
+  if (r.step === 'merge') return renderMerge(app);
   if (r.step === 'crop') return renderCrop(app);
   if (r.step === 'running') return renderRunning(app);
   return renderPick(app);
@@ -96,17 +99,118 @@ function imagePanel(app) {
       toast('读取图片失败：' + e.message, 'error');
       return;
     }
-    if (r.manualCrop) { r.cropIndex = 0; r.step = 'crop'; app.render(); } else runExtraction(app);
+    // 选了几张：先拼成一张大图（同一张图纸拆成几张截图）
+    if (r.works.length > 1) { r.merge = null; r.step = 'merge'; app.render(); return; }
+    afterPick(app);
   });
   box.append(h('label.drop', input,
     h('div.big-ico', '🖼️'),
     h('b', '选择图纸截图'),
-    h('div.small', '可一次选多张（同一张图纸拆成多张截图时，结果会合并）')));
+    h('div.small', '可一次选多张：同一张图纸拆成几张截图时，会自动拼成一张大图（重叠的地方去掉）再识别')));
   if (r.method === 'vlm') {
     box.append(h('label.row.gap.small', { style: { margin: '12px 2px' } }, manualCrop,
       h('span', '自己框选清单区域（更准、更省钱；不勾选则由模型自动找）')));
   }
   return box;
+}
+
+/** 选好图（或者拼好了）：要框清单就去框，否则直接识别 */
+function afterPick(app) {
+  const r = app.rec;
+  if (r.manualCrop) { r.cropIndex = 0; r.step = 'crop'; app.render(); } else runExtraction(app);
+}
+
+// ---------- 多张截图拼成一张大图 ----------
+
+const thumbOf = (cv, hh = 96) => {
+  const k = Math.min(1, hh / cv.height, 160 / cv.width);
+  const t = document.createElement('canvas');
+  t.width = Math.max(1, Math.round(cv.width * k)); t.height = Math.max(1, Math.round(cv.height * k));
+  t.getContext('2d').drawImage(cv, 0, 0, t.width, t.height);
+  return t;
+};
+/** 预览：拼好的整张图（点开可以全屏放大看接缝） */
+function mergePreview(cv, title) {
+  const maxW = Math.min(680, (window.innerWidth || 390) - 32), maxH = (window.innerHeight || 800) * 0.5;
+  const k = Math.min(1, maxW / cv.width, maxH / cv.height);
+  const t = document.createElement('canvas');
+  t.className = 'mg-preview';
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  t.width = Math.round(cv.width * k * dpr); t.height = Math.round(cv.height * k * dpr);
+  t.style.width = Math.round(cv.width * k) + 'px'; t.style.height = Math.round(cv.height * k) + 'px';
+  t.getContext('2d').drawImage(cv, 0, 0, t.width, t.height);
+  t.addEventListener('click', () => openImageViewer([{ name: title, views: [{ key: 'full', label: '拼好的图', src: cv.toDataURL('image/jpeg', 0.9), w: cv.width, h: cv.height }] }], { view: 'full', focus: false }));
+  return h('div.mg-prev-wrap', t);
+}
+
+async function renderMerge(app) {
+  const r = app.rec;
+  app.setTitle('合并成一张大图');
+  app.setBack(() => { r.step = 'pick'; r.works = []; r.merge = null; app.render(); });
+  const view = clear(app.view);
+  const n = r.works.length;
+  if (!r.merge) {
+    view.append(h('div.bd-wait', h('div.spinner'), h('p', h('b', `正在拼 ${n} 张截图…`)), h('p.small.muted', '找每两张之间重叠的地方，对齐后把重叠部分去掉')));
+    try {
+      const res = await autoMerge(r.works);
+      if (app.rec !== r || r.step !== 'merge') return;
+      r.merge = { ...res, manual: res.groups.length > 1, perRow: 1, order: res.groups.map((_, i) => i) };
+    } catch (e) {
+      console.error(e);
+      if (r.step !== 'merge') return;
+      r.merge = { groups: r.works.map((w, i) => ({ members: [i], canvas: w.canvas })), manual: true, perRow: 1, order: r.works.map((_, i) => i), error: e.message };
+    }
+    return app.rerender();
+  }
+  const M = r.merge;
+  const useCanvas = (canvas, note) => {
+    r.works = [{ name: `合并图（${n} 张）`, canvas, content: { x: 0, y: 0, w: canvas.width, h: canvas.height }, rect: null, merged: n }];
+    r.merge = null;
+    toast(note, 'ok');
+    afterPick(app);
+  };
+  const separately = h('div.center', { style: { marginTop: '10px' } }, h('button.link.small', {
+    onclick: () => { r.merge = null; afterPick(app); },
+  }, '不合并，每张分开识别（几张是不同的图纸时）›'));
+
+  if (!M.manual) {
+    // 全部找到了重叠：一张大图
+    const g = M.groups[0];
+    view.append(
+      h('div.banner.ok', h('span.ico', '✓'), h('div', h('b', `${n} 张拼成了一张`), h('div.small', `找到了每张之间重叠的地方，重叠部分只留一份（${g.canvas.width}×${g.canvas.height}）。点图可以放大看接缝对不对。`))),
+      mergePreview(g.canvas, '拼好的图'),
+      h('div.sticky-actions',
+        h('button.btn.primary.big.block.mg-use', { onclick: () => useCanvas(g.canvas, `已拼成一张大图（${n} 张）`) }, '拼对了，用这张大图继续'),
+        h('button.btn.ghost.block.mg-manual', { onclick: () => { M.manual = true; M.pieces = 'originals'; M.order = r.works.map((_, i) => i); app.rerender(); } }, '不对，手动排')),
+      separately);
+    return;
+  }
+
+  // 手动排：找不到重叠的几块（或者用户选了手动）按顺序接起来
+  const blocks = M.pieces === 'originals' ? r.works.map((w, i) => ({ canvas: w.canvas, label: `第 ${i + 1} 张` }))
+    : M.groups.map(gr => ({ canvas: gr.canvas, label: gr.members.length > 1 ? `第 ${gr.members.map(i => i + 1).join('+')} 张（已拼好）` : `第 ${gr.members[0] + 1} 张` }));
+  const order = M.order.filter(i => i < blocks.length);
+  const nb = blocks.length;
+  const perRow = Math.min(M.perRow, nb);
+  const merged = manualMerge(order.map(i => blocks[i].canvas), perRow);
+  const move = (pos, d) => { const o = [...order]; const q = pos + d; if (q < 0 || q >= o.length) return; [o[pos], o[q]] = [o[q], o[pos]]; M.order = o; app.rerender(); };
+  const layouts = [[1, '上下拼'], [nb, '左右拼'], ...(nb >= 4 ? [[2, '每行 2 张']] : []), ...(nb >= 6 ? [[3, '每行 3 张']] : [])];
+  view.append(
+    M.pieces === 'originals' ? h('p.small.muted', '按顺序直接接在一起（不去重叠）。') :
+      h('div.banner.warn', h('span.ico', '🧩'), h('div',
+        h('b', M.error ? '自动拼接出错了，请手动排' : M.groups.length === nb ? `${nb} 张之间都找不到重叠` : `有 ${nb} 块之间找不到重叠`),
+        h('div.small', M.error ? M.error : '可能刚好切在边上，或者有一张只是清单。排好顺序、选上下拼还是左右拼，会直接接在一起。'))),
+    h('div.seg.mg-layout', layouts.map(([k, label]) => h('button' + (perRow === k ? '.on' : ''), { onclick: () => { M.perRow = k; app.rerender(); } }, label))),
+    h('div.mg-list', order.map((bi, pos) => h('div.mg-item', { 'data-block': bi },
+      h('span.mg-n', String(pos + 1)), thumbOf(blocks[bi].canvas), h('div.grow.small', blocks[bi].label),
+      h('button.btn.sm.soft', { 'aria-label': '往前', disabled: pos === 0, onclick: () => move(pos, -1) }, perRow === 1 ? '↑' : '←'),
+      h('button.btn.sm.soft', { 'aria-label': '往后', disabled: pos === nb - 1, onclick: () => move(pos, 1) }, perRow === 1 ? '↓' : '→')))),
+    h('div.section-title', '拼出来是这样'),
+    mergePreview(merged, '拼好的图'),
+    h('div.sticky-actions',
+      h('button.btn.primary.big.block.mg-use', { onclick: () => useCanvas(merged, `已拼成一张大图（${n} 张）`) }, '用这张大图继续'),
+      M.pieces === 'originals' ? h('button.btn.ghost.block', { onclick: () => { M.manual = M.groups.length > 1; M.pieces = null; M.order = M.groups.map((_, i) => i); app.rerender(); } }, '回到自动拼的结果') : null),
+    separately);
 }
 
 function textPanel(app) {
@@ -202,13 +306,24 @@ function renderCrop(app) {
     // 默认：最后一条长格线以下（多数图纸的清单在格子下面）；找不到时框内容区下方 30%
     try { work.rect = guessLegendRect(work.canvas, c); } catch { work.rect = { x: c.x, y: c.y + c.h * 0.7, w: c.w, h: c.h * 0.3 }; }
   }
-  const cr = cropper(work);
+  // 很长的图（几张拼成的）整张显示会窄成一条：默认只显示清单附近那一段
+  const tall = c.h > c.w * 2.4;
+  let region = c;
+  if (tall && !work.showWhole) {
+    const rr = work.rect;
+    const hh = Math.min(c.h, Math.max(c.w * 1.3, rr.h * 1.25));
+    const y1 = Math.min(c.y + c.h, Math.max(rr.y + rr.h + c.w * 0.15, c.y + hh));
+    const y0 = Math.max(c.y, Math.min(rr.y - c.w * 0.1, y1 - hh));
+    region = { x: c.x, y: y0, w: c.w, h: Math.min(c.y + c.h, Math.max(y1, rr.y + rr.h)) - y0 };
+  }
+  const cr = cropper({ canvas: work.canvas, content: region, rect: work.rect });
   view.append(
     h('p.small.muted', '已自动框出最可能是清单的位置。请确认方框框住了', h('b', '所有色块、色号和数量'), '，尽量少框进格子。拖角调整大小，拖中间移动，在框外空白处可重新画。'),
     cr.el,
-    h('div.row.gap', { style: { marginTop: '6px' } },
-      h('button.btn.soft.sm', { onclick: () => { work.rect = { ...c }; app.rerender(); } }, '整张图'),
-      h('button.btn.soft.sm', { onclick: () => { work.rect = null; app.rerender(); } }, '重置'),
+    h('div.row.gap.wrap', { style: { marginTop: '6px' } },
+      h('button.btn.soft.sm', { onclick: () => { work.rect = { ...c }; work.showWhole = true; app.rerender(); } }, '整张图'),
+      h('button.btn.soft.sm', { onclick: () => { work.rect = null; work.showWhole = false; app.rerender(); } }, '重置'),
+      tall ? h('button.btn.ghost.sm.crop-whole', { onclick: () => { work.rect = cr.get(); work.showWhole = !work.showWhole; app.rerender(); } }, work.showWhole ? '只显示清单附近' : '显示整张') : null,
       h('div.grow'),
       i > 0 ? h('button.btn.sm', { onclick: () => { work.rect = cr.get(); r.cropIndex = i - 1; app.render(); } }, '上一张') : null),
     h('div.spacer'),

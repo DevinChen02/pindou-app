@@ -368,15 +368,11 @@ export function digitize(img, opts) {
   return grew && d2 < d1 * 0.5 ? { ...r2, geom: { ...r2.geom, extended: true } } : res;
 }
 
-function digitizeOnce(img, { region, refs, locks = null, dewatermark = false }) {
-  const W = img.width, H = img.height, d = img.data;
-  const R = region || { x: 0, y: 0, w: W, h: H };
-  const rx0 = Math.max(0, Math.round(R.x)), ry0 = Math.max(0, Math.round(R.y));
-  const rx1 = Math.min(W, Math.round(R.x + R.w)), ry1 = Math.min(H, Math.round(R.y + R.h));
-  const L = new Float32Array(W * H);
-  for (let i = 0, p = 0; i < W * H; i++, p += 4) L[i] = lum(d, p);
-
-  // 两轮：先用整个区域估横线，再只在网格范围内估竖线，再回头细化横线
+/**
+ * 在区域里找横竖格线（两轮：先用整个区域估横线，再只在网格范围内估竖线，再回头细化横线）。
+ * 返回 { gx, gy }（各自的 lines、pitch）或 { error }
+ */
+function findGrid(L, W, H, rx0, rx1, ry0, ry1) {
   let Py = profile(L, W, H, 'y', rx0, rx1, ry0, ry1);
   let gy = gridLines(Py, ry0, ry1);
   if (!gy) return { error: '没找到网格横线' };
@@ -402,6 +398,31 @@ function digitizeOnce(img, { region, refs, locks = null, dewatermark = false }) 
   }
   gy = gridLines(profile(L, W, H, 'y', gx.lines[0], gx.lines[gx.lines.length - 1], ry0, ry1), ry0, ry1, (gx.pitch + gy.pitch) / 2) || gy;
 
+  return { gx, gy };
+}
+
+/** 只找网格、返回格子边长（像素）：多图拼接时比较几张截图的缩放比例用。找不到返回 0 */
+export function gridPitchOf(img) {
+  const W = img.width, H = img.height, d = img.data;
+  const L = new Float32Array(W * H);
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) L[i] = lum(d, p);
+  const g = findGrid(L, W, H, 0, W, 0, H);
+  if (g.error) return 0;
+  const n = Math.min(g.gx.lines.length, g.gy.lines.length);
+  return n >= 6 ? (g.gx.pitch + g.gy.pitch) / 2 : 0;
+}
+
+function digitizeOnce(img, { region, refs, locks = null, dewatermark = false }) {
+  const W = img.width, H = img.height, d = img.data;
+  const R = region || { x: 0, y: 0, w: W, h: H };
+  const rx0 = Math.max(0, Math.round(R.x)), ry0 = Math.max(0, Math.round(R.y));
+  const rx1 = Math.min(W, Math.round(R.x + R.w)), ry1 = Math.min(H, Math.round(R.y + R.h));
+  const L = new Float32Array(W * H);
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) L[i] = lum(d, p);
+
+  const grid = findGrid(L, W, H, rx0, rx1, ry0, ry1);
+  if (grid.error) return { error: grid.error };
+  let { gx, gy } = grid;
   let xs = gx.lines, ys = gy.lines;
   // 相位检查：格线很浅、每格又印着字时，“字的那一行”也会形成周期性的峰，可能锁到错位的位置上。
   // 用“色块交界”（两边各自平稳、彼此差很多的台阶）再对一次相位：字的笔画不是台阶，格子交界才是

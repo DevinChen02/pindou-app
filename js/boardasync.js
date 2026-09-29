@@ -5,6 +5,7 @@ const pending = new Map();
 
 async function local(op, img, args) {
   if (op === 'clean') return (await import('./cells.js')).dewatermarkImage(img, args.xs, args.ys, args.cells);
+  if (op === 'stitch') return (await import('./stitch.js')).stitchPlan(args.imgs);
   const m = await import('./board.js');
   return op === 'digitize' ? m.digitize(img, args) : m.classifyGrid(img, args.xs, args.ys, args.refs, args.opt);
 }
@@ -28,10 +29,13 @@ function getWorker() {
   return w || null;
 }
 
-/** op: 'digitize'（args = { region, refs, locks, dewatermark }）、'classify'（args = { xs, ys, refs, opt }）或 'clean'（去水印后的图，args = { xs, ys, cells }） */
+/**
+ * op: 'digitize'（args = { region, refs, locks, dewatermark }）、'classify'（args = { xs, ys, refs, opt }）、
+ * 'clean'（去水印后的图，args = { xs, ys, cells }）或 'stitch'（多张截图找重叠，img = null，args = { imgs }）
+ */
 export function runBoard(op, img, args) {
   const wk = getWorker();
-  const plain = { data: img.data, width: img.width, height: img.height };
+  const plain = img ? { data: img.data, width: img.width, height: img.height } : null;
   if (!wk) return local(op, plain, args);
   return new Promise((resolve, reject) => {
     const id = ++seq;
