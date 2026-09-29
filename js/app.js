@@ -30,7 +30,7 @@ export const app = {
     // 离开上一个页面：拼豆板等页面的清理
     try { this.onLeave?.(); } catch { /* 忽略 */ }
     this.onLeave = null;
-    document.body.classList.remove('mode-build');
+    document.body.classList.remove('mode-build', 'mode-board');
     this.view.className = '';
     clear(this.actions);
     this.backBtn.hidden = true;

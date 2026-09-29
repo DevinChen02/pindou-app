@@ -2,7 +2,7 @@
 import { h, clear, toast, confirmDialog, shareFile } from '../ui.js';
 import * as store from '../store.js';
 import { testConnection } from '../extract/vlm.js';
-import { testOcr } from '../extract/ocr.js';
+import { testOcr, REC_MODELS, cellModelOf, downloadMB, getPP } from '../extract/ocr.js';
 import { renderPaletteManager } from './palette.js';
 import { PALETTE, SERIES } from '../palette.js';
 
@@ -31,6 +31,7 @@ export async function renderSettings(app) {
     view.append(h('div.card', h('div.kv', h('div', h('div.k', '默认识别方法'), h('div.d', '打开“识别”时默认选中')), sel)));
   }
 
+  view.append(h('div.section-title', '识字模型'), modelCard(app));
   view.append(h('div.section-title', '色卡'), paletteCard(app));
   view.append(h('div.section-title', '库存'), inventoryCard(app));
   view.append(h('div.section-title', '数据与备份'), dataCard(app));
@@ -226,6 +227,52 @@ function ocrCard(app) {
         !cfg.enabled ? h('button.btn.ghost', { type: 'button', onclick: () => { draft.open.ocr = false; draft.ocr = null; app.rerender(); } }, '取消') : null)) : null);
 }
 
+// ---------- 识字模型（读拼豆板格子上的色号） ----------
+
+const MODEL_NOTES = {
+  v6s: '更大、更准：实测读拼豆板格子上的色号，读对的格子从 91% 提高到 98%，速度慢约三成。',
+  v5m: '更小、更快：和读清单用的是同一个模型（在手机上读过清单就已经下载好了）。',
+};
+
+function modelCard(app) {
+  const s = app.settings;
+  const cur = cellModelOf(s);
+  const note = h('div.small.muted.model-note');
+  const status = h('div.status-line.model-status');
+  const dlBtn = h('button.btn.sm.soft.model-dl', { type: 'button', hidden: true }, '现在下载');
+  const refresh = async () => {
+    const id = cellModelOf(s), m = REC_MODELS[id];
+    note.textContent = `${m.model}，模型 ${m.mb} MB。${MODEL_NOTES[id]}`;
+    const mb = await downloadMB(id);
+    status.className = 'status-line model-status' + (mb > 0 ? '' : ' ok');
+    status.textContent = mb > 0 ? `还没下载：第一次用时下载约 ${Math.round(mb)} MB（也可以现在先下载好，之后离线可用）` : '✓ 已下载，离线也能用';
+    dlBtn.hidden = !(mb > 0);
+  };
+  dlBtn.onclick = async () => {
+    dlBtn.disabled = true;
+    const id = cellModelOf(s);
+    try {
+      await getPP(m => { status.className = 'status-line model-status'; status.textContent = `下载中… ${Math.round((m.progress || 0) * 100)}%`; }, id);
+      await refresh();
+      if (status.textContent.startsWith('还没下载')) { status.className = 'status-line model-status ok'; status.textContent = '✓ 已加载，可以用了'; dlBtn.hidden = true; }
+    } catch (e) {
+      status.className = 'status-line model-status bad'; status.textContent = '✗ 下载失败：' + (e.message || e);
+    }
+    dlBtn.disabled = false;
+  };
+  const seg = segEl(Object.entries(REC_MODELS).reverse().map(([k, m]) => [k, k === 'v6s' ? `${m.name}（推荐）` : m.name]), cur, async k => {
+    s.cellModel = k;
+    await store.saveSettings(s);
+    toast(`读格子色号改用${REC_MODELS[k].name}模型`, 'ok');
+    refresh();
+  });
+  seg.classList.add('model-seg');
+  refresh();
+  return h('div.card.mcard',
+    h('div.mdesc', { style: { marginBottom: '8px' } }, '读拼豆板格子上印的色号时用（设置拼豆板时的“逐格读色号”、拼豆时的“识字核对”）。读清单一直用标准模型——实测它读清单更准。'),
+    seg, note, status, dlBtn);
+}
+
 // ---------- 实况文本 ----------
 
 function textCard(app) {
@@ -342,7 +389,7 @@ function dataCard(app) {
 
 function aboutCard() {
   return h('div.card',
-    h('p', h('b', '拼豆计数器'), h('span.muted.small', '　v2.5 · 仅供个人使用')),
+    h('p', h('b', '拼豆计数器'), h('span.muted.small', '　v2.6 · 仅供个人使用')),
     h('p.small.muted', '所有库存数据只保存在这台手机的浏览器里。请从主屏幕图标打开（和 Safari 里打开的是两份独立的数据）。'),
     h('p.small.muted', `色卡：${PALETTE.size} 色（${SERIES.join(' ')}）。`));
 }

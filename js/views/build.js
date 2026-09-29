@@ -127,6 +127,7 @@ export async function renderBuild(app) {
   // 第一次进来（或者还没选拼豆板尺寸）：先框拼豆板 → 识别网格 → 选拼豆板尺寸 → 摆放
   if (hasImg && ((!p.board?.place && !p.boardSkip) || setupActive(p))) return renderSetup(app, p);
   view.classList.add('build-view');
+  document.body.classList.add('mode-board'); // 拼豆板铺满一屏：页面本身不滚（设置拼豆板的前几步照常能上下滑）
 
   const items = orderItems(merged(p), orderOf(app.settings));
   const show = showOf(app.settings), spot = spotOf(app.settings);
@@ -631,8 +632,8 @@ async function reviewFlow(app, p) {
     btn.disabled = true;
     const old = btn.textContent;
     try {
-      const { getPP } = await import('../extract/ocr.js');
-      const pp = await getPP(pr => { btn.textContent = `下载识字模型 ${Math.round((pr.progress || 0) * 100)}%`; });
+      const { getPP, cellModelOf } = await import('../extract/ocr.js');
+      const pp = await getPP(pr => { btn.textContent = `下载识字模型 ${Math.round((pr.progress || 0) * 100)}%`; }, cellModelOf(app.settings));
       btn.textContent = '识字中…';
       const img = pix.data;
       const reader = async (box, lex) => {

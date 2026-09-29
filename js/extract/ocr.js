@@ -1,5 +1,6 @@
 // 离线 OCR：自研的分词 / 配对 + 文字识别引擎。识别引擎两种，都随应用部署、首次加载后可离线使用：
-//   高精度：PP-OCRv5（vendor/ppocr + vendor/ort，约 19 MB）——示例图上明显更准，默认
+//   高精度：PP-OCRv5 mobile（vendor/ppocr + vendor/ort，约 19 MB）——示例图上明显更准，默认
+//   （读拼豆板格子上的色号另外可选 PP-OCRv6 small，见 REC_MODELS）
 //   轻量：  Tesseract（vendor/tesseract，约 7 MB）——高精度引擎加载失败时自动退回
 import { analyze, wordImage, pairWords, OCR_ATTEMPTS, plausibleToken, lengthMatches } from './ocr-core.js';
 import { normalizeCode, ocrWhitelist } from '../palette.js';
@@ -43,7 +44,21 @@ export async function getWorker(basePath, onProgress) {
   return workerPromise;
 }
 
-let ppPromise = null;
+/**
+ * 识字模型（都随应用部署在 vendor/ppocr/，第一次用时下载，之后离线可用；两个模型共用 dict.txt）
+ *   v5m 标准：PP-OCRv5 mobile。读清单一直用它（实测读清单比 v6 small 更准）
+ *   v6s 高精度：PP-OCRv6 small。读拼豆板格子上的色号明显更准（实测逐格读对 91% → 98%），慢约三成
+ */
+export const REC_MODELS = {
+  v5m: { name: '标准', model: 'PP-OCRv5 mobile', file: 'rec.onnx', mb: 7.7 },
+  v6s: { name: '高精度', model: 'PP-OCRv6 small', file: 'rec_v6s.onnx', mb: 12.2 },
+};
+export const ORT_MB = 11.3; // ONNX Runtime（WASM），两个模型共用，只下载一次
+export const DEFAULT_CELL_MODEL = 'v6s';
+/** 设置里选的“读格子色号”的模型 */
+export const cellModelOf = settings => (REC_MODELS[settings?.cellModel] ? settings.cellModel : DEFAULT_CELL_MODEL);
+
+const ppCache = new Map();
 /** 按块读取，报告下载进度 */
 async function fetchBytes(url, onProgress) {
   const res = await fetch(url);
@@ -63,10 +78,12 @@ async function fetchBytes(url, onProgress) {
   return out;
 }
 
-/** 加载 PP-OCRv5（ONNX Runtime Web，单线程 WASM：GitHub Pages 没有跨域隔离，用不了多线程） */
-export function getPP(onProgress) {
-  if (ppPromise) return ppPromise;
-  ppPromise = (async () => {
+/** 加载识字模型（ONNX Runtime Web，单线程 WASM：GitHub Pages 没有跨域隔离，用不了多线程）。id：REC_MODELS 的键 */
+export function getPP(onProgress, id = 'v5m') {
+  if (!REC_MODELS[id]) id = 'v5m';
+  if (ppCache.has(id)) return ppCache.get(id);
+  const m = REC_MODELS[id];
+  const pr = (async () => {
     const ortBase = new URL('./vendor/ort/', location.href).href;
     const ppBase = new URL('./vendor/ppocr/', location.href).href;
     const ort = await import(/* @vite-ignore */ ortBase + 'ort.wasm.min.mjs');
@@ -74,14 +91,24 @@ export function getPP(onProgress) {
     ort.env.wasm.numThreads = 1;
     ort.env.wasm.proxy = false;
     const [rec, dict] = await Promise.all([
-      fetchBytes(ppBase + 'rec.onnx', p => onProgress?.({ status: '下载高精度识别模型', progress: p })),
+      fetchBytes(ppBase + m.file, p => onProgress?.({ status: `下载${m.name}识字模型`, progress: p })),
       fetch(ppBase + 'dict.txt').then(r => r.text()),
     ]);
     const { createPPOCR } = await import('./ppocr.js');
     return createPPOCR({ ort, rec, dict });
   })();
-  ppPromise.catch(() => { ppPromise = null; });
-  return ppPromise;
+  ppCache.set(id, pr);
+  pr.catch(() => ppCache.delete(id));
+  return pr;
+}
+
+/** 用这个模型还要下载多少 MB（模型和 ONNX Runtime 已经缓存过的不算；0 = 已下载，离线也能用） */
+export async function downloadMB(id) {
+  const m = REC_MODELS[id] || REC_MODELS.v5m;
+  if (!('caches' in self)) return m.mb + ORT_MB;
+  const has = async f => { try { return !!(await caches.match(new URL(f, location.href).href)); } catch { return false; } };
+  const [a, b] = await Promise.all([has('./vendor/ppocr/' + m.file), has('./vendor/ort/ort-wasm-simd-threaded.wasm')]);
+  return Math.round(((a ? 0 : m.mb) + (b ? 0 : ORT_MB)) * 10) / 10;
 }
 
 function toCanvas(img) {

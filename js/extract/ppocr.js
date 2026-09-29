@@ -25,7 +25,10 @@ function toTensorData(img, sx, sy, sw, sh, W, H, mean, std) {
   return out;
 }
 
-export async function createPPOCR({ ort, det, rec, dict }) {
+/**
+ * recMinW：识别时把一行字的张量补宽到至少这么宽（PP-OCRv6 按 48×320 训练，短的一行字右边补 0 更准；v5 mobile 不需要）
+ */
+export async function createPPOCR({ ort, det, rec, dict, recMinW = 0 }) {
   const opts = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
   const [detS, recS] = await Promise.all([
     det ? ort.InferenceSession.create(det, opts) : null,
@@ -83,7 +86,15 @@ export async function createPPOCR({ ort, det, rec, dict }) {
     const bw = box.x1 - box.x0, bh = box.y1 - box.y0;
     const H = 48;
     const W = Math.max(16, Math.min(1600, Math.round(H * bw / bh / 8) * 8));
-    const t = new ort.Tensor('float32', toTensorData(img, box.x0, box.y0, bw, bh, W, H, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]), [1, 3, H, W]);
+    let data = toTensorData(img, box.x0, box.y0, bw, bh, W, H, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]), Wt = W;
+    if (recMinW > W) {
+      // 右边补 0（归一化后的 0，也就是中灰），和训练时的做法一样
+      Wt = recMinW;
+      const pad = new Float32Array(3 * H * Wt);
+      for (let c = 0; c < 3; c++) for (let y = 0; y < H; y++) pad.set(data.subarray((c * H + y) * W, (c * H + y + 1) * W), (c * H + y) * Wt);
+      data = pad;
+    }
+    const t = new ort.Tensor('float32', data, [1, 3, H, Wt]);
     const out = (await recS.run({ [recS.inputNames[0]]: t }))[recS.outputNames[0]];
     const [, T, C] = out.dims;
     const A = out.data;
@@ -95,7 +106,7 @@ export async function createPPOCR({ ort, det, rec, dict }) {
       let bi = 0, bv = -1;
       if (allowIdx) { for (const i of allowIdx) if (A[row + i] > bv) { bv = A[row + i]; bi = i; } }
       else for (let i = 0; i < C; i++) if (A[row + i] > bv) { bv = A[row + i]; bi = i; }
-      if (bi && bi !== prev) { text += chars[bi]; ps.push(bv); cs.push({ ch: chars[bi], x: box.x0 + (t2 + 0.5) / T * bw, p: bv }); }
+      if (bi && bi !== prev) { text += chars[bi]; ps.push(bv); cs.push({ ch: chars[bi], x: box.x0 + Math.min(bw, (t2 + 0.5) / T * Wt / W * bw), p: bv }); }
       prev = bi;
     }
     const conf = ps.length ? ps.reduce((a, b) => a + b, 0) / ps.length : 0;

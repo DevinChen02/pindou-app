@@ -33,6 +33,7 @@ export const DEFAULT_SETTINGS = {
   buildSpot: false,                 // 高亮当前颜色（板子变暗，其他颜色变暗）
   dewatermark: true,                // 生成拼豆板时去水印（识别时不受水印影响）
   pegboards: [[52, 52], [78, 78], [104, 104]], // 常用拼豆板尺寸（列 × 行）
+  cellModel: 'v6s',                 // 读拼豆板格子上的色号用的识字模型：v6s（高精度，PP-OCRv6 small）| v5m（标准，PP-OCRv5 mobile）
 };
 
 function merge(base, over) {

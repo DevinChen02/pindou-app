@@ -7,6 +7,7 @@ import * as store from '../store.js';
 import { cropper } from '../cropper.js';
 import { swatchCandidates } from '../image.js';
 import { readCells } from '../ocrcells.js';
+import { REC_MODELS, cellModelOf, downloadMB } from '../extract/ocr.js';
 import { gridFromCorners, boardRecord, locksFor, unpackCells } from '../board.js';
 import { runBoard } from '../boardasync.js';
 import { createPanZoom } from '../panzoom.js';
@@ -61,6 +62,7 @@ export async function renderSetup(app, p) {
   if (st.pid !== p.id) startSetup(p, 'frame');
   const view = clear(app.view);
   view.classList.toggle('build-view', st.step === 'place');
+  document.body.classList.toggle('mode-board', st.step === 'place');
   app.setTitle(['frame', 'grid'].includes(st.step) ? '准备拼豆板' : st.step === 'peg' ? '选拼豆板尺寸' : '摆好位置');
   const steps = ['frame', 'grid', 'peg', 'place'];
   const back = () => {
@@ -226,7 +228,8 @@ async function gridStep(app, p, view) {
 
 /** 逐格读色号：读完和颜色一起重新归类（不改网格） */
 function ocrCard(app, p, idx, codes) {
-  const secs = Math.max(5, Math.round(idx.length * 0.035));
+  const model = cellModelOf(app.settings), M = REC_MODELS[model];
+  const secs = Math.max(5, Math.round(idx.length * (model === 'v5m' ? 0.035 : 0.045)));
   const status = h('div.small.su-ocr-status');
   const stopBtn = h('button.btn.sm.ghost', { hidden: true }, '停止');
   const go = h('button.btn.soft.su-ocr-go', {
@@ -242,7 +245,7 @@ function ocrCard(app, p, idx, codes) {
         await ensurePixels(p);
         const t0 = Date.now();
         const { scores, done } = await readCells(st.pix.data, xs, ys, idx, lex, {
-          signal: ctl,
+          signal: ctl, model,
           onProgress: m => {
             if (m.phase === 'model') status.textContent = `下载识字模型 ${Math.round(m.progress * 100)}%（只有第一次）`;
             else {
@@ -274,10 +277,14 @@ function ocrCard(app, p, idx, codes) {
       }
     },
   }, '开始逐格读色号');
+  const dl = h('span');
+  downloadMB(model).then(mb => { dl.textContent = mb > 0 ? `第一次要下载约 ${Math.round(mb)} MB；` : ''; });
   return h('div.card.su-ocr',
     h('div', h('b', '🔍 逐格读色号（更准，要等一会儿）')),
     h('div.small.muted', { style: { margin: '2px 0 8px' } },
-      `${codes.join('、')} 这几种颜色很接近、或者和色卡差得多，只看颜色容易整种认反。用识字模型把这 ${fmtNum(idx.length)} 格上印的色号一格一格读出来，和颜色一起判断。第一次要下载约 19 MB 模型；大约 ${secs} 秒，可以随时停止。`),
+      `${codes.join('、')} 这几种颜色很接近、或者和色卡差得多，只看颜色容易整种认反。用识字模型把这 ${fmtNum(idx.length)} 格上印的色号一格一格读出来，和颜色一起判断。`,
+      dl, `大约 ${secs} 秒，可以随时停止。`),
+    h('div.tiny.muted.su-ocr-model', { style: { margin: '-4px 0 8px' } }, `识字模型：${M.name}（${M.model}），可在 设置 → 识字模型 里换`),
     h('div.row.gap', go, stopBtn), status);
 }
 
