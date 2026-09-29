@@ -342,7 +342,7 @@ function dataCard(app) {
 
 function aboutCard() {
   return h('div.card',
-    h('p', h('b', '拼豆计数器'), h('span.muted.small', '　v2.4 · 仅供个人使用')),
+    h('p', h('b', '拼豆计数器'), h('span.muted.small', '　v2.5 · 仅供个人使用')),
     h('p.small.muted', '所有库存数据只保存在这台手机的浏览器里。请从主屏幕图标打开（和 Safari 里打开的是两份独立的数据）。'),
     h('p.small.muted', `色卡：${PALETTE.size} 色（${SERIES.join(' ')}）。`));
 }

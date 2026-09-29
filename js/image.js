@@ -145,6 +145,28 @@ export function sampleSwatch(canvas, box, shrink = 0.15) {
   return best ? [best[0] / best[3], best[1] / best[3], best[2] / best[3]].map(Math.round) : null;
 }
 
+/**
+ * 清单色块的候选颜色：框里出现最多的前几种颜色（按 5 位量化分组，每组取平均）。
+ * 第一种通常就是色块底色；取歪了（取到字、白底）也没关系，拼豆板归类时会拿图上的格子逐个验证。
+ */
+export function swatchCandidates(canvas, box, shrink = 0.1, top = 3) {
+  const bw = box.x1 - box.x0, bh = box.y1 - box.y0;
+  if (!(bw > 2 && bh > 2)) return null;
+  const x = Math.max(0, box.x0 + bw * shrink), y = Math.max(0, box.y0 + bh * shrink);
+  const w = Math.min(canvas.width - x, bw * (1 - 2 * shrink)), h = Math.min(canvas.height - y, bh * (1 - 2 * shrink));
+  if (w < 1 || h < 1) return null;
+  const { data } = getImageData(canvas, { x, y, w, h });
+  const bins = new Map();
+  for (let p = 0; p < data.length; p += 4) {
+    const k = (data[p] >> 3) << 10 | (data[p + 1] >> 3) << 5 | (data[p + 2] >> 3);
+    let b = bins.get(k);
+    if (!b) { b = [0, 0, 0, 0]; bins.set(k, b); }
+    b[0] += data[p]; b[1] += data[p + 1]; b[2] += data[p + 2]; b[3]++;
+  }
+  const out = [...bins.values()].sort((a, b) => b[3] - a[3]).slice(0, top).map(b => [b[0] / b[3], b[1] / b[3], b[2] / b[3]].map(Math.round));
+  return out.length ? out : null;
+}
+
 /** 估计色块里色号文字的像素高度（判断截图是否太糊）：取若干条目框分别估计再取中位数 */
 export function estimateTextHeightInBoxes(canvas, boxes) {
   const hs = [];

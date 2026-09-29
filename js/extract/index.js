@@ -3,7 +3,7 @@ import { vlmExtract } from './vlm.js';
 import { ocrExtract } from './ocr.js';
 import { parseLegendText } from './text.js';
 import { normalizeCode, deltaE, rgbOf, nearestCodes, isCode } from '../palette.js';
-import { cropCanvas, toDataURL, sampleSwatch, estimateTextHeightInBoxes, thumbnail, guessLegendRect } from '../image.js';
+import { cropCanvas, toDataURL, swatchCandidates, estimateTextHeightInBoxes, thumbnail, guessLegendRect } from '../image.js';
 import { putImage } from '../store.js';
 
 let seq = 0;
@@ -71,14 +71,16 @@ export async function extractImage(method, settings, work, imgIndex, { onStatus,
   }
   const items = res.items.map(it => {
     const code = it.code !== undefined ? it.code : normalizeCode(it.rawCode);
-    let rgb = null;
+    // 清单色块的颜色（候选几种）：核对时比色卡，生成拼豆板时直接当这一色在图上的参考色
+    let swatch = null;
     if (it.box) {
-      try { rgb = sampleSwatch(work.canvas, it.box, method === 'vlm' ? 0.2 : 0.1); } catch { rgb = null; }
+      try { swatch = swatchCandidates(work.canvas, it.box, method === 'vlm' ? 0.2 : 0.1); } catch { swatch = null; }
     }
+    const rgb = swatch?.[0] || null;
     return {
       id: newId(), img: imgIndex,
       code: code || null, rawCode: it.rawCode || '', count: it.count ?? null,
-      box: toDisplayBox(it.box, disp), countBox: toDisplayBox(it.countBox || null, disp), rgb,
+      box: toDisplayBox(it.box, disp), countBox: toDisplayBox(it.countBox || null, disp), rgb, swatch,
       uncertain: !!it.uncertain || lowRes,
       verified: false,
       orig: { code: code || null, count: it.count ?? null },

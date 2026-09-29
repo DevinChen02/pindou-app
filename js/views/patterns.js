@@ -456,7 +456,7 @@ function editItems(app, p) {
     id: newId(), createdAt: Date.now(), method: 'saved', name: p.name, patternId: p.id, tags: p.tags || [],
     images: (p.images || []).map(im => ({ ...im })),
     statedTotal: p.statedTotal || null, statedColors: null, cursor: 0, mode: 'list',
-    items: p.items.map(i => ({ id: newId(), img: null, code: i.code, rawCode: i.code, count: i.count, box: null, rgb: null, uncertain: false, verified: true, orig: { code: i.code, count: i.count } })),
+    items: p.items.map(i => ({ id: newId(), img: null, code: i.code, rawCode: i.code, count: i.count, box: null, rgb: null, swatch: i.swatch || null, uncertain: false, verified: true, orig: { code: i.code, count: i.count } })),
   };
   app.rec.step = 'verify';
   app.saveSession();

@@ -183,7 +183,9 @@ async function gridStep(app, p, view) {
     view.append(h('div.card.su-sum',
       h('div.row.between', h('span.small.muted', '图纸网格'), h('b', `${st.board.cols} 列 × ${st.board.rows} 行`)),
       h('div.row.between', h('span.small.muted', '有豆子的范围'), h('b', `${b.w} 列 × ${b.h} 行`)),
-      h('div.row.between', h('span.small.muted', '豆子'), h('b', `${fmtNum(beads)} 颗`, want ? h('span.small.muted', `（清单 ${fmtNum(want)}）`) : null))));
+      h('div.row.between', h('span.small.muted', '豆子'), h('b', `${fmtNum(beads)} 颗`, want ? h('span.small.muted', `（清单 ${fmtNum(want)}）`) : null)),
+      // 有几种颜色是按清单色块在图上的实际颜色认的（其余按色卡标准色 + 校准）
+      refs.some(r => r.swatch) ? h('div.row.between.su-legend', h('span.small.muted', '按清单色块的颜色认'), h('b', `${(st.board.stats?.legendUsed || []).length} / ${refs.length} 种`)) : null));
     if (want && Math.abs(beads - want) > Math.max(3, want * 0.03)) {
       view.append(h('div.banner.warn', h('span.ico', '⚠️'), h('div', h('b', '颗数和清单差得比较多'), h('div.small', '看看上面红框是不是正好框住了所有格子；不对的话点“行列数不对”手动校准。'))));
     }

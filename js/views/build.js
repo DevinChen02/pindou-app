@@ -16,10 +16,14 @@ const CELL = 20;          // 一格在拼豆板上的尺寸（内容坐标）
 const M = 24;             // 左、上留给坐标数字
 const bs = { pid: null, sel: null, edit: false, busy: false };
 
+/** 图纸的颜色清单（同一色号合并）；带上清单色块在图上的颜色（swatch），拼豆板归类时当参考色 */
 export const merged = p => {
-  const m = new Map();
-  for (const it of p.items) m.set(it.code, (m.get(it.code) || 0) + it.count);
-  return [...m].map(([code, count]) => ({ code, count }));
+  const m = new Map(), sw = new Map();
+  for (const it of p.items) {
+    m.set(it.code, (m.get(it.code) || 0) + it.count);
+    if (!sw.has(it.code) && it.swatch?.length) sw.set(it.code, it.swatch);
+  }
+  return [...m].map(([code, count]) => ({ code, count, swatch: sw.get(code) || null }));
 };
 const rgbFor = code => (isCode(code) ? rgbOf(code) : [180, 180, 180]);
 

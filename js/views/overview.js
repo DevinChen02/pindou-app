@@ -3,7 +3,7 @@
 import { h, clear, toast, sheet, chip, pickCode, stepper, fmtNum } from '../ui.js';
 import { nearestCodes } from '../palette.js';
 import { itemIssues, totalsCheck, newId } from '../extract/index.js';
-import { makeCanvas, sampleSwatch } from '../image.js';
+import { makeCanvas, sampleSwatch, swatchCandidates } from '../image.js';
 import { openImageViewer } from '../viewer.js';
 import { boardRecord } from '../board.js';
 import { runBoard } from '../boardasync.js';
@@ -252,11 +252,21 @@ async function addMissing(app, k, x, y) {
       addBtn),
   ], { title: '补上漏掉的颜色', tall: true });
 
-  function add() {
+  async function add() {
     if (!(code && count > 0)) return;
     const dup = s.items.find(it => it.code === code);
+    // 色块颜色从整张原图上取（清单参考图是压缩过的），生成拼豆板时当这一色的参考色
+    let swatch = null;
+    if (im.fullId && im.fullMap) {
+      try {
+        const { canvas } = await loadPixels({ fullId: im.fullId });
+        const f = im.fullMap, m = v => v * f.k;
+        swatch = swatchCandidates(canvas, { x0: m(box.x0) + f.ox, y0: m(box.y0) + f.oy, x1: m(box.x1) + f.ox, y1: m(box.y1) + f.oy }, 0.1);
+      } catch { swatch = null; }
+    }
+    if (!swatch) { try { swatch = swatchCandidates(cv, box, 0.1); } catch { swatch = null; } }
     s.items.push({
-      id: newId(), img: k, code, rawCode: '', count, box, countBox: null, rgb,
+      id: newId(), img: k, code, rawCode: '', count, box, countBox: null, rgb, swatch,
       uncertain: false, verified: true, orig: null, added: true,
     });
     sh.close();
@@ -327,6 +337,12 @@ export async function addColorSheet(app) {
 
 
 // ---------- 交叉核对：清单 vs 拼豆板 ----------
+/** 每个色号在清单上取到的色块颜色（候选几种；旧数据只有一种 rgb） */
+export function swatchesOf(items) {
+  const m = new Map();
+  for (const it of items) if (it.code && !m.has(it.code) && (it.swatch?.length || it.rgb)) m.set(it.code, it.swatch?.length ? it.swatch : [it.rgb]);
+  return m;
+}
 export const itemsSig = items => {
   const m = new Map();
   for (const it of items) if (it.code && it.count > 0) m.set(it.code, (m.get(it.code) || 0) + it.count);
@@ -335,7 +351,8 @@ export const itemsSig = items => {
 
 async function crossCheck(app, s, card) {
   const sig = itemsSig(s.items);
-  const refs = sig ? sig.split(',').map(x => { const [code, n] = x.split(':'); return { code, count: +n }; }) : [];
+  const sw = swatchesOf(s.items);
+  const refs = sig ? sig.split(',').map(x => { const [code, n] = x.split(':'); return { code, count: +n, swatch: sw.get(code) || null }; }) : [];
   if (!refs.length) { card.remove(); return; }
   let out = s.boardCheck?.sig === sig ? s.boardCheck : null;
   if (!out) {

@@ -289,7 +289,7 @@ function emptyColors(F, printed, refLab) {
 }
 
 /**
- * 归类。refs：[{ code, count, rgb? }]。返回
+ * 归类。refs：[{ code, count, rgb?, swatch?:[[r,g,b],…] 清单色块上取到的几种候选颜色 }]。返回
  *   { codes, cells(Uint8Array，0=空，i+1=codes[i]), counts, margin(Float32Array，每格的把握，越小越可疑),
  *     stats: { printed, exact, total, diff, beads, want, freeCounts, calibrated, textUsed }, suspects }
  */
@@ -307,6 +307,38 @@ export function classifyFeatures(F, refs, opt = {}) {
 
   let refLab = src.map(labOf);
   let emptyLab = emptyColors(F, printed, refLab);
+  // 清单色块的实际颜色：和格子是同一个软件、同一次压缩画出来的，通常和格子颜色一模一样（比色卡标准色 +
+  // 校准准得多）。但取色可能取歪（取到字、白底、隔壁色块），所以每个色号给几种候选颜色（r.swatch），
+  // 只采用“图上确实有一批格子就是这个颜色、离这个色号的色卡色也不算太远”的那一个；两个色号抢同一个颜色时，
+  // 给离色卡色更近的那个。采用了的直接当这一类的参考色（第一轮就用），校准不动它
+  const legendLab = new Array(K).fill(null);
+  if (opt.legend !== false) {
+    const tol = opt.legendTol ?? 2.5, maxDE = opt.legendMaxDE ?? 25;
+    const picks = [];
+    for (let k = 0; k < K; k++) {
+      const cands = refs[k].swatch || [];
+      if (!cands.length) continue;
+      const need = Math.max(2, Math.min((target[k + 1] || 0) * 0.3, 40));
+      const whiteCode = emptyLab.some(e => de2000(refLab[k], e) < 8);
+      let best = null;
+      for (const c of cands) {
+        const L = labOf(c);
+        if (!whiteCode && emptyLab.some(e => de2000(L, e) < 3)) continue; // 取到的是白底
+        const d = de2000(L, refLab[k]);
+        if (d > maxDE || (best && d >= best.d)) continue;
+        let sup = 0;
+        for (let i = 0; i < N && sup < need; i++) if (Math.abs(labs[i][0] - L[0]) < 5 && de2000(labs[i], L) < tol) sup++;
+        if (sup >= need) best = { k, L, d };
+      }
+      if (best) picks.push(best);
+    }
+    picks.sort((a, b) => a.d - b.d);
+    for (const p of picks) {
+      if (picks.some(q => q !== p && legendLab[q.k] && de2000(q.L, p.L) < 1)) continue;
+      legendLab[p.k] = p.L;
+    }
+    for (let k = 0; k < K; k++) if (legendLab[k]) refLab[k] = legendLab[k];
+  }
   const colorCost = new Float32Array(N * K1);
   // “覆盖率”：这一格里有多大比例的像素就是这个颜色。豆子几乎铺满整格（除了字）；
   // 水印、半透明遮挡的格子中位色会偏，但覆盖率一看就不像任何一种豆子
@@ -399,6 +431,8 @@ export function classifyFeatures(F, refs, opt = {}) {
       calibrated = true;
     }
   }
+  // 采用了的清单色块颜色：校准只管其余色号
+  for (let k = 0; k < K; k++) if (legendLab[k]) refLab[k] = legendLab[k];
   // 锁定格子的颜色就是这一类在图上的真实颜色：直接当锚点
   if (locks) {
     const byK = new Map();
@@ -575,6 +609,7 @@ export function classifyFeatures(F, refs, opt = {}) {
     stats: {
       printed, exact: codes.length - diff.length, total: codes.length, diff,
       beads: cntArr.reduce((a, b, k) => a + (k ? b : 0), 0), want: total, freeCounts, calibrated, textUsed, outliers: nOut, dewatermarked,
+      legendUsed: codes.filter((c, k) => legendLab[k]),
     },
     suspects,
   };

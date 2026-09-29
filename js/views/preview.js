@@ -6,7 +6,8 @@ import { openImageViewer, entriesFromImages, hasViewable } from '../viewer.js';
 import { tagSheet, goPattern } from './patterns.js';
 
 function sessionItems(s) {
-  return s.items.filter(i => i.code && i.count > 0).map(i => ({ code: i.code, count: i.count }));
+  // 清单色块的颜色跟着存进图纸：生成拼豆板时当这一色在图上的参考色
+  return s.items.filter(i => i.code && i.count > 0).map(i => ({ code: i.code, count: i.count, ...(i.swatch?.length || i.rgb ? { swatch: i.swatch?.length ? i.swatch : [i.rgb] } : {}) }));
 }
 
 const STATUS = {
