@@ -13,7 +13,7 @@ import { gridFromCorners, boardRecord, locksFor, unpackCells } from '../board.js
 import { runBoard } from '../boardasync.js';
 import { createPanZoom } from '../panzoom.js';
 import { openImageViewer, entriesFromImages } from '../viewer.js';
-import { loadPixels, gridRegion, drawBoard, boardSize, merged, reviewFlow, reviewCount } from './build.js';
+import { loadPixels, gridRegion, drawBoard, boardSize, merged, reviewFlow, reviewCount, placeOf } from './build.js';
 import { goPattern } from './patterns.js';
 
 export const DEFAULT_PEGBOARDS = [[52, 52], [78, 78], [104, 104]];
@@ -55,8 +55,8 @@ const endSetup = () => { st.pid = null; st.active = false; st.pix = null; };
 export function startSetup(p, step = 'frame', redo = false) {
   Object.assign(st, { pid: p.id, active: true, step, redo, im: null, pix: null, frame: null, guess: null, board: step === 'frame' ? null : p.board, gridError: null, busy: false, clean: null, reading: null, readError: null, autoOcrFor: null, autoReviewFor: null });
   // 之前摆过：记住拼豆板尺寸和位置（换尺寸页会高亮，原尺寸再选一次位置不变）
-  if (p.board?.place) Object.assign(st, { W: p.board.place.W, H: p.board.place.H, ox: p.board.place.ox, oy: p.board.place.oy });
-  else Object.assign(st, { W: 0, H: 0, ox: 0, oy: 0 });
+  if (p.board?.place) { const P = placeOf(p.board); Object.assign(st, { W: P.W, H: P.H, ox: P.ox, oy: P.oy, native: P.native }); }
+  else Object.assign(st, { W: 0, H: 0, ox: 0, oy: 0, native: false });
 }
 
 const STEPS = [['frame', '框选'], ['grid', '网格'], ['colors', '颜色'], ['peg', '尺寸'], ['place', '摆放']];
@@ -567,9 +567,9 @@ async function pegStep(app, p, view) {
   const presets = (settings.pegboards?.length ? settings.pegboards : DEFAULT_PEGBOARDS).map(([w, hh]) => [w, hh]);
   const choose = (W, H) => {
     if (!fits(board, W, H)) { toast(`${W}×${H} 放不下这幅图`, 'error'); return; }
-    const keepOffset = st.W === W && st.H === H;
+    const keepOffset = st.W === W && st.H === H && !st.native;
     const P = keepOffset ? clampPlace(board, { W, H, ox: st.ox, oy: st.oy }) : centredPlace(board, W, H);
-    Object.assign(st, { W, H, ox: P.ox, oy: P.oy, step: 'place' });
+    Object.assign(st, { W, H, ox: P.ox, oy: P.oy, native: false, step: 'place' });
     app.rerender();
   };
   const savePresets = async list => { settings.pegboards = list; await store.saveSettings(settings); app.rerender(); };
@@ -600,14 +600,14 @@ async function pegStep(app, p, view) {
         },
       }, '存为常用')),
     h('div.section-title', '或者'),
-    h('button.btn.ghost.block', { onclick: () => { Object.assign(st, { W: board.cols, H: board.rows, ox: 0, oy: 0, step: 'place' }); app.rerender(); } }, `按图纸原来的格子（${board.cols} × ${board.rows}）`));
+    h('button.btn.ghost.block', { onclick: () => { Object.assign(st, { W: board.cols, H: board.rows, ox: 0, oy: 0, native: true, step: 'place' }); app.rerender(); } }, `按图纸原来的格子（${board.cols} × ${board.rows}）`));
 }
 
 // ---------- ⑤ 摆放：整体上下左右平移 ----------
 
 function placeStep(app, p, view) {
   const board = { ...st.board, cells: unpackCells(st.board.cells) };
-  const P0 = clampPlace(board, { W: st.W, H: st.H, ox: st.ox, oy: st.oy, mirror: !!p.board?.place?.mirror });
+  const P0 = clampPlace(board, { W: st.W, H: st.H, ox: st.ox, oy: st.oy, mirror: !!p.board?.place?.mirror, native: !!st.native });
   Object.assign(st, { ox: P0.ox, oy: P0.oy });
   const stage = h('div.bd-stage');
   const layer = h('div.bd-layer');
@@ -621,7 +621,7 @@ function placeStep(app, p, view) {
   const b = beadBox(board);
   const readout = h('div.small.su-read');
   const redraw = () => {
-    const P = { W: st.W, H: st.H, ox: st.ox, oy: st.oy, mirror: P0.mirror };
+    const P = { W: st.W, H: st.H, ox: st.ox, oy: st.oy, mirror: P0.mirror, native: P0.native };
     drawBoard(canvas.getContext('2d'), q, board, { sel: null, done: new Set(), place: P, frame: true });
     const top = b.r0 + st.oy, left = b.c0 + st.ox;
     readout.textContent = `上空 ${top} 行 · 下空 ${st.H - top - b.h} 行 · 左空 ${left} 列 · 右空 ${st.W - left - b.w} 列`;
@@ -652,7 +652,7 @@ function placeStep(app, p, view) {
       h('div.grow.small.muted', '整幅图一起上下左右平移（按住连续移动），豆子不会超出拼豆板。浅色格子是拼豆板上空着的位置。')),
     h('button.btn.primary.block', {
       onclick: async () => {
-        const place = { W: st.W, H: st.H, ox: st.ox, oy: st.oy, mirror: P0.mirror };
+        const place = { W: st.W, H: st.H, ox: st.ox, oy: st.oy, mirror: P0.mirror, native: P0.native };
         await store.patchPattern(p.id, pp => ({ ...pp, board: { ...st.board, place }, boardError: null, boardSkip: false }));
         endSetup();
         toast(`已摆到 ${st.W}×${st.H} 的拼豆板上`, 'ok');

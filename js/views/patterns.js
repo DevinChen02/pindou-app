@@ -279,17 +279,20 @@ async function renderDetail(app) {
         h('td', fmtNum(r.left)),
         h('td', fmtNum(r.stock)),
         h('td.after' + (r.after < 0 ? '.neg' : r.status === 'low' ? '.low' : ''), r.after < 0 ? `缺 ${fmtNum(-r.after)}` : fmtNum(r.after))))))));
-    view.append(h('p.small.muted', Number(settings.lossPercent) > 0 ? `“需要”已按损耗 ${settings.lossPercent}% 向上取整。` : '', p.build?.deducted && Object.keys(p.build.deducted).length ? '已经扣过的部分不再算。' : ''));
+    const diff = store.boardListDiff(p);
+    view.append(h('p.small.muted',
+      store.usesBoard(p) ? `照着拼豆板拼：“需要”按拼豆板上的豆子算${diff.length ? `（${diff.length} 种颜色和清单不一样：${diff.slice(0, 4).map(d => `${d.code} 清单 ${fmtNum(d.list)} · 板上 ${fmtNum(d.board)}`).join('，')}${diff.length > 4 ? '…' : ''}）` : ''}，扣库存也按它。` : '',
+      Number(settings.lossPercent) > 0 ? `“需要”已按损耗 ${settings.lossPercent}% 向上取整。` : '', p.build?.deducted && Object.keys(p.build.deducted).length ? '已经扣过的部分不再算。' : ''));
     if (short.length || low.length) {
       view.append(h('button.btn.block', { onclick: () => copyText([
         ...short.map(r => `${r.code}：缺 ${-r.after} 颗（需要 ${r.left}，现有 ${r.stock}）`),
         ...low.map(r => `${r.code}：拼完剩 ${r.after} 颗（补货线 ${r.threshold}）`)].join('\n')) }, '复制补货清单'));
     }
     view.append(h('div.pd-more',
-      h('button.link', { onclick: () => directFinish(app, p) }, '不用拼豆板，已经拼完了 → 直接扣减库存 ›')));
+      h('button.link', { onclick: () => directFinish(app, p) }, '不用拼豆板，已经拼完了 → 按清单数量直接扣减库存 ›')));
   } else {
     view.append(h('div.section-title', '用到的颜色'));
-    view.append(h('div.pd-colors', p.items.map(i => h('div.pd-color', chip(i.code, { size: 'sm' }), h('span', `×${fmtNum(i.count)}`)))));
+    view.append(h('div.pd-colors', [...store.beadCounts(p)].map(([code, n]) => h('div.pd-color', chip(code, { size: 'sm' }), h('span', `×${fmtNum(n)}`)))));
     const txs = [...(p.build?.txIds || []), ...(p.txId && !(p.build?.txIds || []).includes(p.txId) ? [p.txId] : [])];
     if (txs.length) {
       view.append(h('div.pd-more', h('button.link', { onclick: () => undoPattern(app, p, txs) }, '撤销扣减（库存加回来，图纸回到“拼豆中”）')));
@@ -417,13 +420,13 @@ async function again(app, p) {
   return goPattern(app, id);
 }
 
-/** 不用拼豆板：直接把剩下的全部扣掉 */
+/** 不用拼豆板、已经拼完了：按清单上的数量把剩下的全部扣掉 */
 async function directFinish(app, p) {
-  const left = store.remainingNeed(p, app.settings).filter(r => r.left > 0);
+  const left = store.remainingNeed(p, app.settings, { byList: true }).filter(r => r.left > 0);
   const total = left.reduce((a, r) => a + r.left, 0);
   if (!(await confirmDialog('确定后将确定减少拼豆库存，是否继续？', {
     ok: '确定，扣减库存',
-    detail: `将扣减 ${left.length} 种颜色，共 ${fmtNum(total)} 颗。库存记录不够的颜色扣到 0 为止。之后可以在图纸里“撤销扣减”。`,
+    detail: `按清单上的数量扣减 ${left.length} 种颜色，共 ${fmtNum(total)} 颗。库存记录不够的颜色扣到 0 为止。之后可以在图纸里“撤销扣减”。`,
   }))) return;
   await finishAndShow(app, p, Object.fromEntries(left.map(r => [r.code, r.left])), { finish: true });
 }
@@ -519,10 +522,11 @@ async function renderTotals(app) {
   const items = [], by = new Map();
   for (const p of chosen) {
     const n = copiesOf(p);
-    for (const it of p.items) {
-      items.push({ code: it.code, count: it.count * n });
-      if (!by.has(it.code)) by.set(it.code, []);
-      by.get(it.code).push({ name: p.name || '未命名', count: it.count * n });
+    // 用拼豆板拼的按拼豆板上的颗数（和扣库存一致），其余按清单
+    for (const [code, count] of store.beadCounts(p)) {
+      items.push({ code, count: count * n });
+      if (!by.has(code)) by.set(code, []);
+      by.get(code).push({ name: p.name || '未命名', count: count * n });
     }
   }
   const inv = await store.getInventory();

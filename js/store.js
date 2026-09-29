@@ -243,13 +243,48 @@ function patternAfterUndo(p, tx) {
   return { ...p, status: p.build ? 'building' : 'pending', txId: null, doneAt: null };
 }
 
-/** 这幅图每种颜色还要扣多少（需要 − 已扣） */
-export function remainingNeed(p, settings) {
+/** 是不是用拼豆板拼的：生成了拼豆板、摆好了位置（没选“不用拼豆板”） */
+export function usesBoard(p) {
+  return !!(p?.board?.place && typeof p.board.cells === 'string' && !p.boardSkip);
+}
+
+/** 拼豆板上每种颜色几颗（cells 是压成字符串的，见 board.js packCells） */
+export function boardBeadCounts(board) {
+  const m = new Map(), s = board.cells;
+  for (let i = 0; i < s.length; i++) {
+    const v = s.charCodeAt(i) - 48;
+    if (v > 0) { const c = board.codes[v - 1]; m.set(c, (m.get(c) || 0) + 1); }
+  }
+  return m;
+}
+
+/**
+ * 这幅图每种颜色用多少颗（Map 色号 → 颗数）：
+ *   用拼豆板拼的 → 拼豆板上的颗数（和清单不一样时以拼豆板为准：照着拼豆板拼，用掉的就是板上的豆子）；
+ *   没用拼豆板（或者 byList）→ 清单上的数量。
+ */
+export function beadCounts(p, { byList = false } = {}) {
+  const list = new Map();
+  for (const it of p.items) list.set(it.code, (list.get(it.code) || 0) + it.count);
+  if (byList || !usesBoard(p)) return list;
+  const onBoard = boardBeadCounts(p.board), out = new Map();
+  for (const c of list.keys()) out.set(c, onBoard.get(c) || 0);
+  for (const [c, n] of onBoard) if (!out.has(c)) out.set(c, n);
+  return out;
+}
+
+/** 这幅图每种颜色还要扣多少（需要 − 已扣）。需要 = beadCounts（拼豆板 / 清单）× 损耗 */
+export function remainingNeed(p, settings, { byList = false } = {}) {
   const ded = p.build?.deducted || {};
-  const merged = new Map();
-  for (const it of p.items) merged.set(it.code, (merged.get(it.code) || 0) + it.count);
-  return [...merged].map(([code, count]) => ({ code, count, need: needOf(count, settings), deducted: ded[code] || 0 }))
+  return [...beadCounts(p, { byList })].map(([code, count]) => ({ code, count, need: needOf(count, settings), deducted: ded[code] || 0 }))
     .map(r => ({ ...r, left: Math.max(0, r.need - r.deducted) }));
+}
+
+/** 拼豆板上和清单颗数不一样的颜色：[{ code, list, board }]（没用拼豆板时为空） */
+export function boardListDiff(p) {
+  if (!usesBoard(p)) return [];
+  const list = beadCounts(p, { byList: true }), onBoard = beadCounts(p);
+  return [...onBoard].filter(([c, n]) => (list.get(c) || 0) !== n).map(([code, n]) => ({ code, list: list.get(code) || 0, board: n }));
 }
 
 export async function patchPattern(id, patch) {

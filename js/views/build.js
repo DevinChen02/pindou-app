@@ -130,12 +130,15 @@ export async function renderBuild(app) {
   view.classList.add('build-view');
   document.body.classList.add('mode-board'); // 拼豆板铺满一屏：页面本身不滚（设置拼豆板的前几步照常能上下滑）
 
-  const items = orderItems(merged(p), orderOf(app.settings));
+  // 照着拼豆板拼：每种颜色的颗数用拼豆板上的（排序、显示、扣库存都一致）；listCount = 清单上写的
+  const counts = store.beadCounts(p);
+  const items = orderItems(merged(p).map(it => ({ ...it, listCount: it.count, count: counts.get(it.code) ?? it.count })), orderOf(app.settings));
   const show = showOf(app.settings), spot = spotOf(app.settings);
   const done = new Set(p.build?.done || []);
   if (bs.sel && !items.some(i => i.code === bs.sel)) bs.sel = null;
 
-  const board = p.board ? { ...p.board, cells: unpackCells(p.board.cells) } : null;
+  // 选了“不用拼豆板”：只按颜色打勾（识别时顺手算出的拼豆板也不画）
+  const board = p.board && !p.boardSkip ? { ...p.board, cells: unpackCells(p.board.cells) } : null;
   const boardCount = new Map();
   if (board) for (const v of board.cells) if (v) boardCount.set(board.codes[v - 1], (boardCount.get(board.codes[v - 1]) || 0) + 1);
 
@@ -231,8 +234,8 @@ export async function renderBuild(app) {
     tray.append(h('div.bd-selbar',
       chip(it.code, { size: 'md' }),
       h('div.grow',
-        h('b', `${it.code} · ${fmtNum(it.count)} 颗`),
-        board ? h('div.tiny.muted', (bc === it.count ? '' : `板上 ${bc} / 清单 ${it.count} · `) + (spot ? `亮的 = 正在拼，暗的 = 已拼好，${show === 'real' ? '没拼的先不画' : '最暗 = 还没拼'}` : show === 'real' ? '浅色 = 已拼好，没拼的先不画' : '浅色 = 已拼好，最淡 = 还没拼')) : null),
+        h('b', `${it.code} · ${fmtNum(it.count)} 颗`, it.listCount !== it.count ? h('span.tiny.muted', `（清单 ${fmtNum(it.listCount)}）`) : null),
+        board ? h('div.tiny.muted', (bc === it.count ? '' : `板上 ${bc} · `) + (spot ? `亮的 = 正在拼，暗的 = 已拼好，${show === 'real' ? '没拼的先不画' : '最暗 = 还没拼'}` : show === 'real' ? '浅色 = 已拼好，没拼的先不画' : '浅色 = 已拼好，最淡 = 还没拼')) : null),
       h('button.btn' + (isDone ? '.ghost' : '.ok'), {
         onclick: async () => {
           await store.setColorDone(p.id, it.code, !isDone);
@@ -270,11 +273,32 @@ function keepTrayScroll(colors) {
   bs.trayScroll = colors.scrollLeft;
 }
 
-/** 拼豆板怎么摆：拼豆板 W×H 格，图纸网格 (r,c) 放在拼豆板 (r+oy, c+ox)；mirror = 左右翻转着看 */
+/**
+ * 拼豆板怎么摆：拼豆板 W×H 格，图纸网格 (r,c) 放在拼豆板 (r+oy, c+ox)；mirror = 左右翻转着看；
+ * native = “按图纸原来的格子”（辅助线和图纸上的线对齐，从边上开始）
+ */
 export function placeOf(board) {
   const P = board.place;
-  if (P && P.W > 0 && P.H > 0) return { W: P.W, H: P.H, ox: P.ox || 0, oy: P.oy || 0, mirror: !!P.mirror };
-  return { W: board.cols, H: board.rows, ox: 0, oy: 0, mirror: false };
+  if (P && P.W > 0 && P.H > 0) {
+    const native = P.native ?? (P.W === board.cols && P.H === board.rows && !P.ox && !P.oy);
+    return { W: P.W, H: P.H, ox: P.ox || 0, oy: P.oy || 0, mirror: !!P.mirror, native };
+  }
+  return { W: board.cols, H: board.rows, ox: 0, oy: 0, mirror: false, native: true };
+}
+
+/**
+ * 拼豆板上每 5 颗一条的辅助线从第几条格线开始（0 = 贴边）：实物拼豆板两边留的一样多——
+ * 52×52 两边各空 1 颗、78×78 各空 4 颗、104×104 各空 2 颗，中间每 5 颗一条（n − 2×留边 是 5 的倍数）。
+ * “按图纸原来的格子”时从边上开始，和图纸上的线对齐。
+ */
+export function guideStart(n, native = false) {
+  return native ? 0 : (3 * n) % 5; // 2×留边 ≡ n (mod 5) → 留边 ≡ 3n (mod 5)
+}
+/** 辅助线在拼豆板上的位置（格线序号 0..n，不含外框） */
+export function guideLines(n, native = false) {
+  const out = [];
+  for (let c = guideStart(n, native); c <= n; c += 5) if (c > 0 && c < n) out.push(c);
+  return out;
 }
 export const boardSize = P => ({ W: M + P.W * CELL + 8, H: M + P.H * CELL + 8 });
 
@@ -369,11 +393,12 @@ export function drawBoard(g, q, board, { sel, done, place = null, show = 'real',
       g.globalAlpha = 1;
     }
   }
-  // 每 5 格的引导线 + 外框
+  // 外框 + 每 5 格的辅助线（位置按拼豆板尺寸，见 guideLines；镜像时跟着翻过来）
   g.strokeStyle = '#7d858f'; g.lineWidth = 1.6;
   g.beginPath();
-  for (let c = 0; c <= cols; c++) if (c % 5 === 0 || c === cols) { g.moveTo(M + c * CELL, M); g.lineTo(M + c * CELL, M + rows * CELL); }
-  for (let r = 0; r <= rows; r++) if (r % 5 === 0 || r === rows) { g.moveTo(M, M + r * CELL); g.lineTo(M + cols * CELL, M + r * CELL); }
+  const vx = [0, cols, ...guideLines(cols, P.native).map(c => (P.mirror ? cols - c : c))];
+  for (const c of vx) { g.moveTo(M + c * CELL, M); g.lineTo(M + c * CELL, M + rows * CELL); }
+  for (const r of [0, rows, ...guideLines(rows, P.native)]) { g.moveTo(M, M + r * CELL); g.lineTo(M + cols * CELL, M + r * CELL); }
   g.stroke();
   // 坐标：1、5、10、15…
   g.fillStyle = '#6b6f75'; g.font = `600 9px -apple-system, "PingFang SC", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
@@ -483,13 +508,14 @@ function editCell(app, p, board, r, c, where = null) {
 
 function menu(app, p) {
   const hasImg = p.images?.some(im => im.fullId);
+  const hasBoard = !!(p.board && !p.boardSkip); // 选了“不用拼豆板”时没有拼豆板的那些功能
   const s = sheet(h('div.menu',
     hasImg ? h('button', { onclick: () => { s.close(); openImageViewer(entriesFromImages(p.images), { view: 'full', focus: false }); } }, '🖼 看原图') : null,
-    p.board ? h('button', { onclick: () => { s.close(); bs.edit = !bs.edit; app.rerender(); } }, bs.edit ? '✏️ 退出修正模式' : '✏️ 修正格子颜色') : null,
-    p.board && hasImg ? h('button', { onclick: () => { s.close(); reviewFlow(app, p); } }, '🔍 核对拼豆板（相近色、没把握的格子）') : null,
-    p.board ? h('button', { onclick: () => { s.close(); compareSheet(p); } }, '📊 拼豆板和清单对一对') : null,
-    p.board ? h('button', { onclick: () => { s.close(); toggleMirror(app, p); } }, p.board.place?.mirror ? '⇋ 取消镜像' : '⇋ 镜像（左右翻转）') : null,
-    p.board ? h('button', { onclick: () => { s.close(); startSetup(p, 'peg'); app.rerender(); } }, '📏 换拼豆板尺寸 / 调整位置') : null,
+    hasBoard ? h('button', { onclick: () => { s.close(); bs.edit = !bs.edit; app.rerender(); } }, bs.edit ? '✏️ 退出修正模式' : '✏️ 修正格子颜色') : null,
+    hasBoard && hasImg ? h('button', { onclick: () => { s.close(); reviewFlow(app, p); } }, '🔍 核对拼豆板（相近色、没把握的格子）') : null,
+    hasBoard ? h('button', { onclick: () => { s.close(); compareSheet(p); } }, '📊 拼豆板和清单对一对') : null,
+    hasBoard ? h('button', { onclick: () => { s.close(); toggleMirror(app, p); } }, p.board.place?.mirror ? '⇋ 取消镜像' : '⇋ 镜像（左右翻转）') : null,
+    hasBoard ? h('button', { onclick: () => { s.close(); startSetup(p, 'peg'); app.rerender(); } }, '📏 换拼豆板尺寸 / 调整位置') : null,
     hasImg ? h('button', {
       onclick: async () => {
         s.close();
@@ -735,7 +761,7 @@ async function finishAll(app, p) {
   const total = left.reduce((a, r) => a + r.left, 0);
   if (!(await confirmDialog('确定后将确定减少拼豆库存，是否继续？', {
     ok: '确定，扣减库存',
-    detail: `全图已拼好：将扣减 ${left.length} 种颜色，共 ${fmtNum(total)} 颗${Number(app.settings.lossPercent) > 0 ? `（含损耗 ${app.settings.lossPercent}%）` : ''}。库存记录不够的颜色扣到 0 为止。之后可以在图纸里撤销。`,
+    detail: `全图已拼好：${store.usesBoard(p) ? '按拼豆板上的豆子' : '按清单数量'}扣减 ${left.length} 种颜色，共 ${fmtNum(total)} 颗${Number(app.settings.lossPercent) > 0 ? `（含损耗 ${app.settings.lossPercent}%）` : ''}。库存记录不够的颜色扣到 0 为止。之后可以在图纸里撤销。`,
   }))) return;
   bs.sel = null;
   await finishAndShow(app, p, Object.fromEntries(left.map(r => [r.code, r.left])), { finish: true });
