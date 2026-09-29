@@ -34,3 +34,35 @@ export async function readCells(img, xs, ys, idx, lex, { onProgress, signal, mod
   onProgress?.({ phase: 'read', done, total: idx.length });
   return { scores, done };
 }
+
+/**
+ * 读到的色号跟着拼豆板存下来（以后核对、重新认颜色时照样用上，读字的结果不会被冲掉）。
+ * 每格存“每个色号比最像的那个差多少”（0–8，和归类里的上限一样），一格一串字符，很省地方。
+ */
+export function packOcr(scores, idx, codes) {
+  const K1 = codes.length + 1, ii = [];
+  let d = '';
+  for (const i of idx) {
+    const sc = scores[i];
+    if (!sc) continue;
+    let mx = -Infinity; for (const v of sc) if (v > mx) mx = v;
+    ii.push(i);
+    for (let k = 0; k < K1; k++) d += String.fromCharCode(35 + Math.round(Math.min(8, mx - sc[k]) * 10));
+  }
+  return ii.length ? { codes: [...codes], idx: ii, d } : null;
+}
+
+/** 存下来的读字结果 → 归类用的 opt.ocr（按现在的颜色清单顺序；清单里后加的颜色当“不像”） */
+export function ocrOpt(board, refs) {
+  const o = board?.ocr;
+  if (!o?.idx?.length) return null;
+  const K1o = o.codes.length + 1;
+  const scores = new Array(board.rows * board.cols).fill(null);
+  const map = refs.map(r => o.codes.indexOf(r.code));
+  o.idx.forEach((i, j) => {
+    if (i >= scores.length) return;
+    const g = k => (o.d.charCodeAt(j * K1o + k) - 35) / 10;
+    scores[i] = [...map.map(m => (m >= 0 ? -g(m) : -8)), -g(K1o - 1)];
+  });
+  return { scores, w: 8, early: true };
+}

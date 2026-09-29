@@ -5,6 +5,7 @@ import * as store from '../store.js';
 import { packCells, unpackCells, boardRecord, locksFor } from '../board.js';
 import { runBoard } from '../boardasync.js';
 import { boardReview, verifyIdentities, identityRisks } from '../cells.js';
+import { ocrOpt } from '../ocrcells.js';
 import { createPanZoom } from '../panzoom.js';
 import { rgbOf, isCode, codeCompare } from '../palette.js';
 import { openImageViewer, entriesFromImages } from '../viewer.js';
@@ -555,7 +556,8 @@ export async function reviewFlow(app, p, { board = p.board, onDone = null } = {}
   const cols = board.cols;
   // 已有的锁定（以前核对/修正过的）
   const locks = new Map(locksFor(board, refs) || []);
-  const run = async () => { res = await runBoard('classify', pix.data, { xs: geo.xs, ys: geo.ys, refs, opt: { locks, dewatermark: !!board.dewatermark } }); res.rows = board.rows; res.cols = cols; };
+  const ocr = ocrOpt(board, refs); // 以前读过的色号（逐格读色号）照样算进去
+  const run = async () => { res = await runBoard('classify', pix.data, { xs: geo.xs, ys: geo.ys, refs, opt: { locks, dewatermark: !!board.dewatermark, ocr } }); res.rows = board.rows; res.cols = cols; };
   try {
     pix = await loadPixels(im); await run();
     // 去水印模式：核对时看的放大图也用去掉水印的（格子里的字更好认）
@@ -609,7 +611,7 @@ export async function reviewFlow(app, p, { board = p.board, onDone = null } = {}
   const finish = async () => {
     clear(body).append(h('div.bd-wait', h('div.spinner'), h('p.small.muted', '按你确认的格子重新计算整板…')));
     await run();
-    const rec = boardRecord({ ...res, geom: geo }, board.imageId, { auto: board.auto, manual: board.manual, reviewedAt: Date.now(), edits: board.edits || 0, place: board.place || null, dewatermark: !!board.dewatermark, ocrRead: board.ocrRead || 0 }, locks);
+    const rec = boardRecord({ ...res, geom: geo }, board.imageId, { auto: board.auto, manual: board.manual, reviewedAt: Date.now(), edits: board.edits || 0, place: board.place || null, dewatermark: !!board.dewatermark, ocrRead: board.ocrRead || 0, ocr: board.ocr || null }, locks);
     const before = unpackCells(board.cells);
     let diff = 0;
     for (let i = 0; i < res.cells.length; i++) {
