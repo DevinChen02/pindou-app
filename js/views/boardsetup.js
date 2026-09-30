@@ -133,13 +133,14 @@ async function frameStep(app, p, view) {
     wait.remove();
   }
   const work = { canvas: st.pix.canvas, content: { x: 0, y: 0, w: st.pix.canvas.width, h: st.pix.canvas.height }, rect: st.frame };
-  const cr = cropper(work, { maxVh: 55 });
+  const cr = cropper(work, { maxVh: 58, fill: true });
   view.append(
-    h('p.small.muted', '把', h('b', '整块拼豆板（所有格子）'), '框在方框里，框进清单和编号栏也没关系。拖角调大小，拖中间移动。'),
+    h('p.small.muted', '把', h('b', '整块拼豆板（所有格子）'), '框在方框里，框进清单和编号栏也没关系。拖角或边调大小，拖中间的 ✥ 移动；两指捏合或双击放大，放大后单指拖动看别处（不会碰到框）。'),
     cr.el,
     h('div.row.gap', { style: { marginTop: '6px' } },
       h('button.btn.soft.sm', { onclick: () => { st.frame = { ...work.content }; app.rerender(); } }, '整张图'),
       st.guess ? h('button.btn.soft.sm', { onclick: () => { st.frame = st.guess; app.rerender(); } }, '重置') : null,
+      cr.tools,
       h('span.grow'),
       h('button.link.small', {
         onclick: async () => { await store.patchPattern(p.id, { boardSkip: true }); endSetup(); app.rerender(); },

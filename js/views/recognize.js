@@ -318,11 +318,12 @@ function renderCrop(app) {
   }
   const cr = cropper({ canvas: work.canvas, content: region, rect: work.rect });
   view.append(
-    h('p.small.muted', '已自动框出最可能是清单的位置。请确认方框框住了', h('b', '所有色块、色号和数量'), '，尽量少框进格子。拖角调整大小，拖中间移动，在框外空白处可重新画。'),
+    h('p.small.muted', '已自动框出最可能是清单的位置。请确认方框框住了', h('b', '所有色块、色号和数量'), '，尽量少框进格子。拖角或边调整大小，拖中间的 ✥ 移动；两指捏合或双击放大看清楚。'),
     cr.el,
     h('div.row.gap.wrap', { style: { marginTop: '6px' } },
       h('button.btn.soft.sm', { onclick: () => { work.rect = { ...c }; work.showWhole = true; app.rerender(); } }, '整张图'),
       h('button.btn.soft.sm', { onclick: () => { work.rect = null; work.showWhole = false; app.rerender(); } }, '重置'),
+      cr.tools,
       tall ? h('button.btn.ghost.sm.crop-whole', { onclick: () => { work.rect = cr.get(); work.showWhole = !work.showWhole; app.rerender(); } }, work.showWhole ? '只显示清单附近' : '显示整张') : null,
       h('div.grow'),
       i > 0 ? h('button.btn.sm', { onclick: () => { work.rect = cr.get(); r.cropIndex = i - 1; app.render(); } }, '上一张') : null),

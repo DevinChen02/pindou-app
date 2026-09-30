@@ -262,15 +262,27 @@ details.help { background: var(--card); border-radius: 12px; padding: 10px 14px;
 details.help summary { font-weight: 600; cursor: pointer; font-size: 14.5px; }
 
 /* 框选清单 */
-.crop-wrap { position: relative; margin: 8px auto; touch-action: none; user-select: none; -webkit-user-select: none; border-radius: 10px; overflow: hidden; background: #000; }
-.crop-wrap img { display: block; width: 100%; height: 100%; pointer-events: none; }
+.crop-wrap { position: relative; margin: 8px auto; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; border-radius: 10px; overflow: hidden; background: #000; }
+.crop-wrap.fill { width: 100%; background: #2a2a2e; }
+.crop-wrap .crop-img { position: absolute; left: 0; top: 0; display: block; max-width: none; transform-origin: 0 0; pointer-events: none; }
 .crop-shade { position: absolute; inset: 0; pointer-events: none; }
-.crop-rect { position: absolute; border: 2px solid var(--accent); box-shadow: 0 0 0 9999px rgba(0,0,0,.45); border-radius: 4px; }
+.crop-rect { position: absolute; border: 2px solid var(--accent); box-shadow: 0 0 0 9999px rgba(0,0,0,.45); border-radius: 4px; pointer-events: none; }
+/* 拖的地方：四个角（圆点）、四条边（短条）、中间 ✥（挪整个框）；手指按在别处不会改框 */
 .crop-rect .hd { position: absolute; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); border: 3px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
-.crop-rect .hd[data-k=nw] { transform: translate(-35%, -35%); }
-.crop-rect .hd[data-k=ne] { transform: translate(-65%, -35%); }
-.crop-rect .hd[data-k=sw] { transform: translate(-35%, -65%); }
-.crop-rect .hd[data-k=se] { transform: translate(-65%, -65%); }
+.crop-rect .hd[data-k=nw] { left: 0; top: 0; transform: translate(-35%, -35%); }
+.crop-rect .hd[data-k=ne] { left: 100%; top: 0; transform: translate(-65%, -35%); }
+.crop-rect .hd[data-k=sw] { left: 0; top: 100%; transform: translate(-35%, -65%); }
+.crop-rect .hd[data-k=se] { left: 100%; top: 100%; transform: translate(-65%, -65%); }
+.crop-rect .hd.ed { width: 30px; height: 10px; border-radius: 5px; border-width: 2px; }
+.crop-rect .hd.ed[data-k=w], .crop-rect .hd.ed[data-k=e] { width: 10px; height: 30px; }
+.crop-rect .hd[data-k=n] { left: 50%; top: 0; transform: translate(-50%, -50%); }
+.crop-rect .hd[data-k=s] { left: 50%; top: 100%; transform: translate(-50%, -50%); }
+.crop-rect .hd[data-k=w] { left: 0; top: 50%; transform: translate(-50%, -50%); }
+.crop-rect .hd[data-k=e] { left: 100%; top: 50%; transform: translate(-50%, -50%); }
+.crop-rect .hd.mv { left: 50%; top: 50%; width: 34px; height: 34px; transform: translate(-50%, -50%); background: rgba(255,255,255,.88); border: 2px solid var(--accent); color: var(--accent); font-size: 18px; line-height: 30px; text-align: center; }
+.crop-rect.no-mv .hd.mv, .crop-rect.no-ed .hd.ed { display: none; }
+.crop-zoom { display: inline-flex; gap: 6px; }
+.crop-zoom .btn { min-width: 38px; font-size: 17px; padding-left: 0; padding-right: 0; }
 .crop-label { position: absolute; left: 6px; top: 6px; background: var(--accent); color: #fff; font-size: 12px; padding: 2px 8px; border-radius: 6px; pointer-events: none; }
 
 /* 进度 */
