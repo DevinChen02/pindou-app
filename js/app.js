@@ -5,6 +5,7 @@ import { renderInventory } from './views/inventory.js';
 import { renderSettings } from './views/settings.js';
 import { clear, toast, h } from './ui.js';
 import { APP_VERSION } from './version.js';
+import { status as licenseStatus, renderGate } from './license.js';
 window.__appVersion = APP_VERSION; // 测试用：当前运行的版本
 
 const views = {
@@ -92,6 +93,9 @@ document.getElementById('tabbar').addEventListener('click', e => {
 });
 
 async function start() {
+  // 试用激活：没激活（或到期）的设备只显示激活页面（见 license.js）
+  const lic = await licenseStatus().catch(e => { console.warn(e); return { ok: true }; });
+  if (!lic.ok) { renderGate(lic, () => start()); return; }
   await store.loadPalette();
   try {
     if (navigator.storage?.persist) {

@@ -1,5 +1,5 @@
 // “设置”标签：识别方法开关（开启前必须填好所需参数并通过自检）、库存参数、备份。
-import { h, clear, toast, confirmDialog, shareFile } from '../ui.js';
+import { h, clear, toast, confirmDialog, shareFile, copyText } from '../ui.js';
 import * as store from '../store.js';
 import { testConnection } from '../extract/vlm.js';
 import { testOcr, REC_MODELS, cellModelOf, downloadMB, getPP } from '../extract/ocr.js';
@@ -7,6 +7,7 @@ import { renderPaletteManager } from './palette.js';
 import { PALETTE, SERIES } from '../palette.js';
 import { APP_VERSION } from '../version.js';
 import { updater } from '../app.js';
+import * as license from '../license.js';
 
 const PROVIDERS = {
   anthropic: { name: 'Claude', full: 'Anthropic Claude', keyHint: 'sk-ant-…', where: 'platform.claude.com → API Keys' },
@@ -37,7 +38,8 @@ export async function renderSettings(app) {
   view.append(h('div.section-title', '色卡'), paletteCard(app));
   view.append(h('div.section-title', '库存'), inventoryCard(app));
   view.append(h('div.section-title', '数据与备份'), dataCard(app));
-  view.append(h('div.section-title', '关于'), aboutCard());
+  view.append(h('div.section-title', '关于'), aboutCard(app));
+  if (license.hasOwnerKey()) view.append(h('div.section-title', '试用激活码（只有你的手机上有）'), ownerCard(app));
 }
 
 function switchEl(checked, onchange) {
@@ -389,7 +391,7 @@ function dataCard(app) {
       }, '清空')));
 }
 
-function aboutCard() {
+function aboutCard(app) {
   const line = h('div.small.muted.about-line');
   const btn = h('button.btn.sm.soft.about-check', {
     type: 'button',
@@ -407,5 +409,60 @@ function aboutCard() {
     line,
     h('p.small.muted', '发了新版本后，打开 App 时会自动更新（正在做事时不打断，顶上会出现“立即更新”）。'),
     h('p.small.muted', '所有库存数据只保存在这台手机的浏览器里。请从主屏幕图标打开（和 Safari 里打开的是两份独立的数据）。'),
-    h('p.small.muted', `色卡：${PALETTE.size} 色（${SERIES.join(' ')}）。`));
+    h('p.small.muted', `色卡：${PALETTE.size} 色（${SERIES.join(' ')}）。`),
+    licenseLine(),
+    license.hasOwnerKey() ? null : h('div.row.end', h('button.btn.sm.ghost.about-owner', { type: 'button', onclick: () => license.ownerImport(() => app.rerender()) }, '作者：导入密钥')));
+}
+
+/** 这台设备的试用激活情况 */
+function licenseLine() {
+  const el = h('p.small.muted.about-license', `设备码 ${license.deviceId()}`);
+  license.status().then(st => {
+    const what = st.dev ? '本地测试，不用激活' : st.owner ? '作者（这台手机上有密钥），永久' : st.ok ? `试用激活：${license.expText(st.exp)}` : '还没激活';
+    el.textContent = `设备码 ${license.deviceId()} · ${what}`;
+  }).catch(() => {});
+  return el;
+}
+
+// ---------- 作者：给朋友生成试用激活码 ----------
+
+const DAYS = [['7', '7 天'], ['30', '30 天'], ['90', '90 天'], ['0', '永久']];
+function ownerCard(app) {
+  let days = '30';
+  const dev = h('input.input.own-dev', { placeholder: '对方的设备码，如 K7Q4-M2XD', autocapitalize: 'characters', autocomplete: 'off', spellcheck: false });
+  const note = h('input.input.own-note', { placeholder: '备注（谁的，可不填）', autocomplete: 'off' });
+  const out = h('div.own-out');
+  const list = h('div.own-list');
+  const drawList = () => {
+    const log = license.issued().slice(0, 8);
+    clear(list).append(...(log.length ? [h('div.tiny.muted', '最近生成的：'), ...log.map(x => h('div.tiny.muted', `${x.note ? x.note + ' · ' : ''}${x.dev} · ${license.expText(x.exp)}`))] : []));
+  };
+  drawList();
+  const gen = h('button.btn.primary.own-gen', {
+    type: 'button',
+    onclick: async () => {
+      try {
+        const r = await license.makeCode(dev.value, +days, note.value);
+        clear(out).append(
+          h('div.small', h('b', `给 ${r.dev} 的激活码`), ` · ${license.expText(r.exp)}`),
+          h('div.mono.own-code', r.code),
+          h('div.row.gap-s', h('button.btn.sm.soft', { type: 'button', onclick: () => copyText(r.code) }, '复制激活码')),
+          h('div.tiny.muted', '发给对方，在他 App 的激活页面粘贴。只能在那一台设备上用，转给别人没用。'));
+        drawList();
+      } catch (e) { toast(e.message, 'error'); }
+    },
+  }, '生成激活码');
+  return h('div.card',
+    h('p.small.muted', { style: { marginTop: 0 } }, '朋友第一次打开 App 会看到自己的“设备码”，让他发给你；在这里生成激活码发回去。'),
+    field('设备码', dev),
+    field('能用多久', segEl(DAYS, days, v => { days = v; })),
+    field('备注', note),
+    gen, out, list,
+    h('div.row.end', { style: { marginTop: '10px' } }, h('button.btn.sm.ghost', {
+      type: 'button',
+      onclick: async () => {
+        if (!(await confirmDialog('从这台手机上移除作者密钥？', { ok: '移除', danger: true, detail: '移除后这台手机不能再生成激活码（已经发出去的照样能用）。这台手机本身已经激活，不受影响。以后可以用“拼豆激活密钥.txt”在 关于 → “作者：导入密钥” 再导入。' }))) return;
+        license.removeOwnerKey(); toast('已移除'); app.rerender();
+      },
+    }, '移除密钥')));
 }
