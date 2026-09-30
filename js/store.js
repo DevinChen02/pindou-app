@@ -351,6 +351,22 @@ export async function setColorDone(id, code, done) {
   });
 }
 
+/** 发到 iPad 上拼了：记一下（拼的页面多一个“全拼好了”，iPad 上打的勾可以扫回来） */
+export async function markSentToIpad(id) {
+  return patchPattern(id, p => {
+    const b = p.build || { startedAt: Date.now(), done: [], deducted: {}, txIds: [] };
+    return { ...p, status: p.status === 'done' ? p.status : 'building', build: { ...b, ipadAt: Date.now() } };
+  });
+}
+
+/** iPad 扫回来的进度：拼好了哪些颜色（整个换成 iPad 上的） */
+export async function setDoneColors(id, codes) {
+  return patchPattern(id, p => {
+    const b = p.build || { startedAt: Date.now(), done: [], deducted: {}, txIds: [] };
+    return { ...p, status: p.status === 'done' ? p.status : 'building', build: { ...b, done: [...new Set(codes)], ipadAt: b.ipadAt || Date.now() } };
+  });
+}
+
 /** 还算不算“开始拼了”：打过勾，或者扣过库存（没撤销） */
 export function buildTouched(p) {
   return !!(p.build && ((p.build.done || []).length || Object.values(p.build.deducted || {}).some(n => n > 0)));

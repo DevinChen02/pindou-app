@@ -128,7 +128,7 @@ export const updater = {
 
 /** 现在刷新会不会丢掉正在做的事：弹层开着、正在添加图纸（识别中）、正在设置或拼拼豆板 */
 function busy() {
-  if (document.querySelector('.backdrop, .pz')) return true;
+  if (document.querySelector('.backdrop, .pz, .qrscan')) return true;
   return app.tab === 'patterns' && ['add', 'build'].includes(app.pat.page);
 }
 

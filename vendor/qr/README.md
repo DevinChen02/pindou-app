@@ -1,0 +1,1 @@
+生成二维码（iPhone ↔ iPad 传拼豆板和进度用）：`qrcode.mjs` 是 [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) 2.0.4（MIT，见 LICENSE-qrcode-generator），用 esbuild 从 npm 包打包成 ES 模块（`export default`），没有改动代码。

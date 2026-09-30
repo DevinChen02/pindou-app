@@ -1,20 +1,22 @@
 // 开始拼豆：把图纸数字化成拼豆板（可缩放，每 5 格一条引导线），选一个颜色只看这个颜色，
 // 拼好一个颜色打一个勾；全部拼好后扣库存。中途可以结束：拼好的扣掉，没拼的放回库存。
-import { h, clear, toast, sheet, confirmDialog, chip, fmtNum, stepper, pickCode, icon, optionSheet } from '../ui.js';
+// 拼豆板怎么画、这一屏的拼豆板和颜色条在 ../boardview.js（iPad 看板也用）。
+import { h, clear, toast, sheet, confirmDialog, chip, fmtNum, stepper } from '../ui.js';
 import * as store from '../store.js';
 import { packCells, unpackCells, boardRecord, locksFor } from '../board.js';
 import { runBoard } from '../boardasync.js';
 import { boardReview, verifyIdentities, identityRisks } from '../cells.js';
 import { ocrOpt } from '../ocrcells.js';
-import { createPanZoom } from '../panzoom.js';
-import { rgbOf, isCode, codeCompare } from '../palette.js';
 import { openImageViewer, entriesFromImages } from '../viewer.js';
 import { makeCanvas, contentBounds, guessLegendRect } from '../image.js';
+import { orderItems, orderOf, showOf, spotOf, placeOf, viewSheet as viewOptions, boardStage, colorStrip, keepTrayScroll, selBar, cellCounts } from '../boardview.js';
 import { goPattern, finishAndShow, revertPending } from './patterns.js';
 import { renderSetup, startSetup, setupActive } from './boardsetup.js';
+import { ipadSheet, sentToIpad, scanProgress } from './ipad-send.js';
 
-const CELL = 20;          // 一格在拼豆板上的尺寸（内容坐标）
-const M = 24;             // 左、上留给坐标数字
+// 别的页面（准备拼豆板、测试）从这里拿画拼豆板的函数
+export { placeOf, guideStart, guideLines, boardSize, drawBoard, orderItems, BUILD_ORDERS, BUILD_SHOWS } from '../boardview.js';
+
 const bs = { pid: null, sel: null, edit: false, busy: false };
 
 /** 图纸的颜色清单（同一色号合并）；带上清单色块在图上的颜色（swatch），拼豆板归类时当参考色 */
@@ -27,42 +29,15 @@ export const merged = p => {
   }
   return [...m].map(([code, count]) => ({ code, count, swatch: sw.get(code) || null, ...(sure.has(code) ? { swatchSure: true } : {}) }));
 };
-const rgbFor = code => (isCode(code) ? rgbOf(code) : [180, 180, 180]);
 
-// ---------- 拼的顺序、板上怎么显示（设置里记住） ----------
-export const BUILD_ORDERS = [
-  { value: 'count', short: '多→少', label: '颗数多的先拼（推荐）', desc: '先把大面积的颜色拼上，剩下的小颜色有了参照更好找位置' },
-  { value: 'countAsc', short: '少→多', label: '颗数少的先拼', desc: '零散的小颜色先拼完' },
-  { value: 'code', short: '色号', label: '按色号', desc: 'A1、A2…，和色卡顺序一样' },
-  { value: 'list', short: '清单', label: '按图纸清单的顺序', desc: '和图纸上清单写的顺序一样' },
-];
-export const BUILD_SHOWS = [
-  { value: 'real', short: '像实物', label: '像实物（推荐）', desc: '正在拼的颜色是深色，已经拼好的是浅色，还没拼的先不画——和手上的拼豆板一模一样，最好对照' },
-  { value: 'fade', short: '三种深浅', label: '三种深浅', desc: '正在拼的最深，已经拼好的浅一些，还没拼的最淡（能看到整幅图，但很浅的颜色不太分得清）' },
-];
-const orderOf = settings => (BUILD_ORDERS.some(o => o.value === settings.buildOrder) ? settings.buildOrder : 'count');
-const showOf = settings => (settings.buildShow === 'fade' ? 'fade' : 'real');
-const SPOT_OPTS = [
-  { value: 'off', label: '不高亮', desc: '按上面选的显示方式画' },
-  { value: 'on', label: '高亮当前颜色', desc: '板子变暗，正在拼的颜色亮起来、外面一圈白边；其他颜色变暗（已拼好的更暗）。也可以点拼豆板上的“✦ 高亮”随时开关' },
-];
-const spotOf = settings => !!settings.buildSpot;
-/** 颜色按选好的顺序排 */
-export function orderItems(items, order) {
-  const list = items.map((it, i) => ({ ...it, i }));
-  if (order === 'count') list.sort((a, b) => b.count - a.count || codeCompare(a.code, b.code));
-  else if (order === 'countAsc') list.sort((a, b) => a.count - b.count || codeCompare(a.code, b.code));
-  else if (order === 'code') list.sort((a, b) => codeCompare(a.code, b.code));
-  return list;
+/** 拼的时候底部的颜色：每种颜色的颗数用拼豆板上的（排序、显示、扣库存都一致）；listCount = 清单上写的 */
+export function buildItems(p, settings) {
+  const counts = store.beadCounts(p);
+  return orderItems(merged(p).map(it => ({ ...it, listCount: it.count, count: counts.get(it.code) ?? it.count })), orderOf(settings));
 }
 
 function viewSheet(app) {
-  const save = key => async v => { app.settings[key] = v; await store.saveSettings(app.settings); app.rerender(); };
-  optionSheet('拼的顺序和显示', [
-    { title: '先拼哪个颜色（底部颜色的排列、拼好后自动跳到的下一个）', value: orderOf(app.settings), options: BUILD_ORDERS, onPick: save('buildOrder') },
-    { title: '选了一个颜色时，板上怎么显示', value: showOf(app.settings), options: BUILD_SHOWS, onPick: save('buildShow') },
-    { title: '高亮当前颜色（其他颜色变暗）', value: spotOf(app.settings) ? 'on' : 'off', options: SPOT_OPTS, onPick: async v => { app.settings.buildSpot = v === 'on'; await store.saveSettings(app.settings); app.rerender(); } },
-  ]);
+  viewOptions(app.settings, async (key, v) => { app.settings[key] = v; await store.saveSettings(app.settings); app.rerender(); });
 }
 
 async function toggleSpot(app) {
@@ -117,7 +92,7 @@ export function reviewCount(board) {
 export async function renderBuild(app) {
   const p = await store.getPattern(app.pat.id);
   if (!p) { app.pat.page = 'list'; return app.render(); }
-  if (bs.pid !== p.id) Object.assign(bs, { pid: p.id, sel: null, edit: false, trayScroll: 0 });
+  if (bs.pid !== p.id) Object.assign(bs, { pid: p.id, sel: null, edit: false, trayScroll: null, view: null, info: null });
   document.body.classList.add('mode-build');
   app.setTitle(p.name || '拼豆');
   app.setBack(() => { bs.edit = false; goPattern(app, p.id); });
@@ -126,87 +101,41 @@ export async function renderBuild(app) {
   const hasImg = p.images?.some(im => im.fullId);
   // 第一次进来（或者还没选拼豆板尺寸）：先准备拼豆板（框选 → 网格 → 颜色 → 尺寸 → 摆放）
   if (hasImg && ((!p.board?.place && !p.boardSkip) || setupActive(p))) return renderSetup(app, p);
+  // 选了“不用拼豆板”：只按颜色打勾（识别时顺手算出的拼豆板也不画）
+  const board = p.board && !p.boardSkip ? { ...p.board, cells: unpackCells(p.board.cells) } : null;
+  const items = buildItems(p, app.settings);
+  if (board) app.actions.append(h('button.btn.sm.soft.ipad-btn', { 'aria-label': '在 iPad 上拼', onclick: () => ipadSheet(app, p, items) }, '📲 iPad'));
   app.actions.append(h('button.btn.sm.soft', { 'aria-label': '更多', onclick: () => menu(app, p) }, '⋯'));
   view.classList.add('build-view');
   document.body.classList.add('mode-board'); // 拼豆板铺满一屏：页面本身不滚（设置拼豆板的前几步照常能上下滑）
 
-  // 照着拼豆板拼：每种颜色的颗数用拼豆板上的（排序、显示、扣库存都一致）；listCount = 清单上写的
-  const counts = store.beadCounts(p);
-  const items = orderItems(merged(p).map(it => ({ ...it, listCount: it.count, count: counts.get(it.code) ?? it.count })), orderOf(app.settings));
   const show = showOf(app.settings), spot = spotOf(app.settings);
   const done = new Set(p.build?.done || []);
   if (bs.sel && !items.some(i => i.code === bs.sel)) bs.sel = null;
-
-  // 选了“不用拼豆板”：只按颜色打勾（识别时顺手算出的拼豆板也不画）
-  const board = p.board && !p.boardSkip ? { ...p.board, cells: unpackCells(p.board.cells) } : null;
-  const boardCount = new Map();
-  if (board) for (const v of board.cells) if (v) boardCount.set(board.codes[v - 1], (boardCount.get(board.codes[v - 1]) || 0) + 1);
+  const boardCount = board ? cellCounts(board) : new Map();
 
   // ---- 拼豆板 ----
-  const stage = h('div.bd-stage');
+  let stage;
   if (board) {
-    const layer = h('div.bd-layer');
-    const canvas = h('canvas');
-    layer.append(canvas);
-    const info = h('div.bd-info', { hidden: true });
-    const place = placeOf(board);
-    const zoomBar = h('div.bd-zoom',
-      h('button.wide.bd-mirror' + (place.mirror ? '.on' : ''), { 'aria-label': '镜像', 'aria-pressed': String(!!place.mirror), onclick: () => toggleMirror(app, p) }, '⇋', h('span.t', ' 镜像')),
-      h('button.wide.bd-spot' + (spot ? '.on' : ''), { 'aria-label': '高亮当前颜色', 'aria-pressed': String(spot), onclick: () => toggleSpot(app) }, '✦', h('span.t', ' 高亮')),
-      h('button', { 'aria-label': '缩小', onclick: () => pz.zoomBy(1 / 1.6) }, '−'),
-      h('button.wide', { onclick: () => pz.fit() }, '适合'),
-      h('button', { 'aria-label': '放大', onclick: () => pz.zoomBy(1.6) }, '＋'));
-    if (place.mirror) stage.append(h('div.bd-mirror-tag', '镜像中（左右翻转）'));
-    // 放大后行号、列号固定在左边、上边
-    const rulers = makeRulers(stage, place);
-    stage.append(layer, ...rulers.els, info, zoomBar);
-    if (bs.edit) stage.append(h('div.bd-editbar', h('span', '✏️ 修正模式：点格子改颜色'), h('button.btn.sm', { onclick: () => { bs.edit = false; app.rerender(); } }, '完成')));
+    const editBar = bs.edit ? h('div.bd-editbar', h('span', '✏️ 修正模式：点格子改颜色'), h('button.btn.sm', { onclick: () => { bs.edit = false; app.rerender(); } }, '完成')) : null;
     // （核对没把握的格子在“准备拼豆板 → 颜色”那一步做；拼的时候想再核对：⋯ → 核对拼豆板）
-    const { W, H } = boardSize(place);
-    const q = Math.max(1, Math.min(2.5, Math.sqrt(9e6 / (W * H))));
-    canvas.width = Math.round(W * q); canvas.height = Math.round(H * q);
-    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
-    drawBoard(canvas.getContext('2d'), q, board, { sel: bs.sel, done, place, show, spot });
-    let infoTimer = null;
-    // 点格子会切换选中颜色、整页重画：提示条跟着带过去，别一闪就没了
-    const showInfo = (text, until) => {
-      info.hidden = false; info.textContent = text;
-      bs.info = { pid: p.id, text, until };
-      clearTimeout(infoTimer); infoTimer = setTimeout(() => { info.hidden = true; }, Math.max(0, until - Date.now()));
-    };
-    if (bs.info?.pid === p.id && bs.info.until > Date.now()) showInfo(bs.info.text, bs.info.until);
-    const pz = createPanZoom(stage, layer, {
-      maxFit: 14,
-      onChange: st => rulers.update(st),
-      onTap: ({ x, y }) => {
-        // 点的是拼豆板上第几行第几列（镜像时左右反过来），再换回图纸网格里的那一格
-        const px = Math.floor((x - M) / CELL), py = Math.floor((y - M) / CELL);
-        if (px < 0 || py < 0 || px >= place.W || py >= place.H) return;
-        const pc = place.mirror ? place.W - 1 - px : px;
-        const c = pc - place.ox, r = py - place.oy;
-        const inGrid = c >= 0 && r >= 0 && c < board.cols && r < board.rows;
-        const v = inGrid ? board.cells[r * board.cols + c] : 0;
-        const code = v ? board.codes[v - 1] : null;
-        const where = `第 ${py + 1} 行 · 第 ${px + 1} 列`;
-        if (bs.edit) { if (inGrid) editCell(app, p, board, r, c, where); else toast('这里在图纸外面，是拼豆板的空位'); return; }
-        showInfo(`${where} · ${code || '空'}`, Date.now() + 2200);
-        if (code && code !== bs.sel && items.some(i => i.code === code)) { bs.sel = code; app.rerender(); }
+    const st = boardStage({
+      board, place: placeOf(board), sel: bs.sel, done, show, spot,
+      onMirror: () => toggleMirror(app, p),
+      onSpot: () => toggleSpot(app),
+      onTap: (cell, showInfo) => {
+        if (bs.edit) { if (cell.inGrid) editCell(app, p, board, cell.r, cell.c, cell.where); else toast('这里在图纸外面，是拼豆板的空位'); return; }
+        showInfo(`${cell.where} · ${cell.code || '空'}`, Date.now() + 2200);
+        if (cell.code && cell.code !== bs.sel && items.some(i => i.code === cell.code)) { bs.sel = cell.code; app.rerender(); }
       },
+      view: { get: () => (bs.view?.pid === p.id ? bs.view.st : null), set: st => { bs.view = { pid: p.id, st }; } },
+      info: { get: () => (bs.info?.pid === p.id ? bs.info : null), set: v => { bs.info = { pid: p.id, ...v }; } },
+      extra: editBar ? [editBar] : [],
     });
-    app.onLeave = () => pz.destroy();
-    requestAnimationFrame(() => {
-      pz.setContent(W, H);
-      // 换颜色、打勾后重画：保持原来的缩放位置
-      if (bs.view && bs.view.pid === p.id) { Object.assign(pz.state, bs.view.st); pz.zoomAt(pz.state.s, 0, 0); }
-    });
-    // 记住缩放位置（换颜色重画时不跳回去）
-    const saveView = () => { bs.view = { pid: p.id, st: { s: pz.state.s, tx: pz.state.tx, ty: pz.state.ty } }; };
-    stage.addEventListener('pointerup', saveView);
-    stage.addEventListener('wheel', saveView);
-    zoomBar.addEventListener('click', saveView);
+    stage = st.stage;
+    app.onLeave = () => st.pz.destroy();
   } else {
-    stage.classList.add('noboard');
-    stage.append(h('div.bd-noboard',
+    stage = h('div.bd-stage.noboard', h('div.bd-noboard',
       h('div.big-ico', '📋'),
       h('p', h('b', hasImg ? '现在只按颜色打勾（没用拼豆板）' : '这张图纸没有原图，没法生成拼豆板')),
       p.boardError ? h('p.small.muted', `原因：${p.boardError}`) : null,
@@ -217,261 +146,47 @@ export async function renderBuild(app) {
   // ---- 底部：颜色列表 + 操作 ----
   const nDone = items.filter(i => done.has(i.code)).length;
   const allDone = nDone === items.length;
-  const colors = h('div.hscroll.bd-colors',
-    h('button.bd-sortb', { 'aria-label': '拼的顺序和显示方式', onclick: () => viewSheet(app) }, icon('sort'), h('span.lab', BUILD_ORDERS.find(o => o.value === orderOf(app.settings)).short)),
-    h('button.bd-color.all' + (!bs.sel ? '.on' : ''), { onclick: () => { bs.sel = null; app.rerender(); } }, h('span.lab', '全部'), h('span.n', `${items.length} 色`)),
-    items.map(it => h('button.bd-color' + (bs.sel === it.code ? '.on' : '') + (done.has(it.code) ? '.done' : ''), {
-      'data-code': it.code,
-      onclick: () => { bs.sel = bs.sel === it.code ? null : it.code; app.rerender(); },
-    }, chip(it.code, { size: 'sm' }), h('span.n', fmtNum(it.count)), done.has(it.code) ? h('span.ck', '✓') : null)));
-  // 点颜色会整页重画：颜色条停在原来滑到的位置，不跳回最左边
-  colors.addEventListener('scroll', () => { bs.trayScroll = colors.scrollLeft; }, { passive: true });
+  const scroll = { get: () => bs.trayScroll, set: v => { bs.trayScroll = v; } };
+  const colors = colorStrip({
+    items, sel: bs.sel, done, settings: app.settings, scroll,
+    onSort: () => viewSheet(app),
+    onPick: code => { bs.sel = code; app.rerender(); },
+  });
   const tray = h('div.bd-tray', colors);
   if (bs.sel) {
     const it = items.find(i => i.code === bs.sel);
-    const bc = boardCount.get(it.code) || 0;
     const isDone = done.has(it.code);
-    tray.append(h('div.bd-selbar',
-      chip(it.code, { size: 'md' }),
-      h('div.grow',
-        h('b', `${it.code} · ${fmtNum(it.count)} 颗`, it.listCount !== it.count ? h('span.tiny.muted', `（清单 ${fmtNum(it.listCount)}）`) : null),
-        board ? h('div.tiny.muted', (bc === it.count ? '' : `板上 ${bc} · `) + (spot ? `亮的 = 正在拼，暗的 = 已拼好，${show === 'real' ? '没拼的先不画' : '最暗 = 还没拼'}` : show === 'real' ? '浅色 = 已拼好，没拼的先不画' : '浅色 = 已拼好，最淡 = 还没拼')) : null),
-      h('button.btn' + (isDone ? '.ghost' : '.ok'), {
-        onclick: async () => {
-          await store.setColorDone(p.id, it.code, !isDone);
-          if (!isDone) {
-            toast(`${it.code} 拼好了 ✓`, 'ok');
-            const next = items.find(x => x.code !== it.code && !done.has(x.code));
-            bs.sel = next ? next.code : null;
-          }
-          app.rerender();
-        },
-      }, isDone ? '↺ 还没拼好' : '✓ 这个颜色拼好了')));
+    tray.append(selBar({
+      it, boardCount: boardCount.get(it.code) || 0, isDone, hasBoard: !!board, show, spot,
+      onToggle: async () => {
+        await store.setColorDone(p.id, it.code, !isDone);
+        if (!isDone) {
+          toast(`${it.code} 拼好了 ✓`, 'ok');
+          const next = items.find(x => x.code !== it.code && !done.has(x.code));
+          bs.sel = next ? next.code : null;
+        }
+        app.rerender();
+      },
+    }));
   }
+  // 在 iPad 上拼的：这里的勾可能没打，全拼好了也能直接结算
+  const onIpad = !!board && sentToIpad(p);
   tray.append(h('div.bd-foot',
     h('div.grow.small', h('b', `已拼好 ${nDone}/${items.length} 色`), h('div.progress', h('i', { style: { width: (nDone / items.length * 100) + '%' } }))),
     allDone
       ? h('button.btn.primary', { onclick: () => finishAll(app, p) }, '🎉 全图已拼好')
-      : h('button.btn.soft', { onclick: () => endSheet(app, p) }, '先拼到这里…')));
+      : onIpad
+        ? h('div.row.gap-s', h('button.btn.soft', { onclick: () => endSheet(app, p) }, '先拼到这里…'), h('button.btn.primary.bd-alldone', { onclick: () => finishAll(app, p) }, '🎉 全拼好了'))
+        : h('button.btn.soft', { onclick: () => endSheet(app, p) }, '先拼到这里…')));
   view.append(stage, tray);
-  keepTrayScroll(colors);
-  requestAnimationFrame(() => keepTrayScroll(colors));
+  keepTrayScroll(colors, bs.sel, scroll);
 }
-
-/** 颜色条放回上次的位置；选中的颜色（比如拼好后自动跳到的下一个）不在屏幕里时，才挪到刚好露出来 */
-function keepTrayScroll(colors) {
-  if (!colors.isConnected) return;
-  let x = bs.trayScroll || 0;
-  const on = bs.sel && colors.querySelector('.bd-color.on');
-  if (on) {
-    const base = colors.getBoundingClientRect().left;
-    const l = on.getBoundingClientRect().left - base + colors.scrollLeft, r = l + on.offsetWidth, w = colors.clientWidth;
-    if (l < x) x = Math.max(0, l - 12);
-    else if (r > x + w) x = r - w + 12;
-  }
-  colors.scrollLeft = x;
-  bs.trayScroll = colors.scrollLeft;
-}
-
-/**
- * 拼豆板怎么摆：拼豆板 W×H 格，图纸网格 (r,c) 放在拼豆板 (r+oy, c+ox)；mirror = 左右翻转着看；
- * native = “按图纸原来的格子”（辅助线和图纸上的线对齐，从边上开始）
- */
-export function placeOf(board) {
-  const P = board.place;
-  if (P && P.W > 0 && P.H > 0) {
-    const native = P.native ?? (P.W === board.cols && P.H === board.rows && !P.ox && !P.oy);
-    return { W: P.W, H: P.H, ox: P.ox || 0, oy: P.oy || 0, mirror: !!P.mirror, native };
-  }
-  return { W: board.cols, H: board.rows, ox: 0, oy: 0, mirror: false, native: true };
-}
-
-/**
- * 拼豆板上每 5 颗一条的辅助线从第几条格线开始（0 = 贴边）：实物拼豆板两边留的一样多——
- * 52×52 两边各空 1 颗、78×78 各空 4 颗、104×104 各空 2 颗，中间每 5 颗一条（n − 2×留边 是 5 的倍数）。
- * “按图纸原来的格子”时从边上开始，和图纸上的线对齐。
- */
-export function guideStart(n, native = false) {
-  return native ? 0 : (3 * n) % 5; // 2×留边 ≡ n (mod 5) → 留边 ≡ 3n (mod 5)
-}
-/** 辅助线在拼豆板上的位置（格线序号 0..n，不含外框） */
-export function guideLines(n, native = false) {
-  const out = [];
-  for (let c = guideStart(n, native); c <= n; c += 5) if (c > 0 && c < n) out.push(c);
-  return out;
-}
-export const boardSize = P => ({ W: M + P.W * CELL + 8, H: M + P.H * CELL + 8 });
 
 async function toggleMirror(app, p) {
   const on = !p.board.place?.mirror;
   await store.patchPattern(p.id, pp => ({ ...pp, board: { ...pp.board, place: { ...placeOf(pp.board), mirror: on } } }));
   toast(on ? '已镜像：拼豆板左右翻转显示' : '已取消镜像', 'ok');
   app.rerender();
-}
-
-/**
- * 画拼豆板：每格一颗豆子（有孔的圆），空格是小钉；每 5 格一条粗线，边上标坐标。
- * 选了一个颜色时豆子分三种：正在拼（深色）、已拼好（浅色）、还没拼——
- *   show='real'：还没拼的不画（和手上的拼豆板一样）；show='fade'：还没拼的画得最淡。
- * 没选颜色（看全部）时：已拼好的浅色，其余正常。
- * spot=true（高亮当前颜色）且选了颜色：板子变暗，正在拼的原色 + 白圈，其他颜色变暗（已拼好的比没拼的更暗）。
- */
-export function drawBoard(g, q, board, { sel, done, place = null, show = 'real', spot = false }) {
-  const P = place || placeOf(board);
-  const { cells, codes } = board;
-  const rows = P.H, cols = P.W;
-  g.setTransform(q, 0, 0, q, 0, 0);
-  const { W, H } = boardSize(P);
-  g.fillStyle = '#f7f6f3'; g.fillRect(0, 0, W, H);
-  const selIdx = sel ? codes.indexOf(sel) + 1 : 0;
-  const dark = spot && selIdx > 0;
-  g.fillStyle = dark ? '#2f2f33' : '#ffffff'; g.fillRect(M, M, cols * CELL, rows * CELL);
-  // 细格线
-  g.strokeStyle = dark ? '#3e3e43' : '#ebe9e4'; g.lineWidth = 1;
-  g.beginPath();
-  for (let c = 0; c <= cols; c++) { g.moveTo(M + c * CELL + 0.5, M); g.lineTo(M + c * CELL + 0.5, M + rows * CELL); }
-  for (let r = 0; r <= rows; r++) { g.moveTo(M, M + r * CELL + 0.5); g.lineTo(M + cols * CELL, M + r * CELL + 0.5); }
-  g.stroke();
-  // 豆子
-  const peg = dark ? '#55555b' : '#dedbd4';
-  const colorOf = codes.map(c => rgbFor(c));
-  const rad = CELL * 0.43, hole = CELL * 0.13;
-  // 图纸网格以外的拼豆板位置：浅灰底（摆放时看得出图纸占哪一块）
-  const gx0 = P.ox, gy0 = P.oy, gx1 = P.ox + board.cols, gy1 = P.oy + board.rows;
-  if (gx0 > 0 || gy0 > 0 || gx1 < cols || gy1 < rows) {
-    g.fillStyle = dark ? '#28282b' : '#f1efea';
-    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-      if (c >= gx0 && c < gx1 && r >= gy0 && r < gy1) continue;
-      const x = P.mirror ? cols - 1 - c : c;
-      g.fillRect(M + x * CELL, M + r * CELL, CELL, CELL);
-    }
-  }
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const br = r - P.oy, bc = c - P.ox;
-      const v = br >= 0 && bc >= 0 && br < board.rows && bc < board.cols ? cells[br * board.cols + bc] : 0;
-      const x = P.mirror ? cols - 1 - c : c;
-      const cx = M + x * CELL + CELL / 2, cy = M + r * CELL + CELL / 2;
-      if (!v) {
-        g.fillStyle = peg;
-        g.beginPath(); g.arc(cx, cy, 1.4, 0, Math.PI * 2); g.fill();
-        continue;
-      }
-      const code = codes[v - 1];
-      // 这颗豆子现在是哪种：cur 正在拼 / done 已拼好 / todo 还没拼
-      const stage = v === selIdx ? 'cur' : done.has(code) ? 'done' : selIdx ? 'todo' : 'cur';
-      if (stage === 'todo' && show === 'real') {
-        g.fillStyle = peg;
-        g.beginPath(); g.arc(cx, cy, 1.4, 0, Math.PI * 2); g.fill();
-        continue;
-      }
-      let [R, G, B] = colorOf[v - 1] || [180, 180, 180];
-      if (dark) {
-        // 高亮：正在拼的原色 + 白圈；其他颜色压暗（已拼好的 30%，没拼的 18%），在暗底上还认得出颜色
-        if (stage !== 'cur') { const k = stage === 'done' ? 0.3 : 0.18; R = Math.round(R * k + 30); G = Math.round(G * k + 30); B = Math.round(B * k + 33); }
-        g.fillStyle = `rgb(${R},${G},${B})`;
-        g.beginPath(); g.arc(cx, cy, rad, 0, Math.PI * 2); g.fill();
-        if (stage === 'cur') {
-          g.lineWidth = 2; g.strokeStyle = '#ffffff'; g.stroke();
-          const lum = 0.299 * R + 0.587 * G + 0.114 * B;
-          g.fillStyle = lum > 200 ? 'rgba(0,0,0,.18)' : 'rgba(255,255,255,.55)';
-          g.beginPath(); g.arc(cx, cy, hole, 0, Math.PI * 2); g.fill();
-        }
-        continue;
-      }
-      if (stage === 'done') {
-        // 浅色：往白色掺 60%，描一圈淡边——白色、米色的豆子也看得出来
-        R = Math.round(R + (255 - R) * 0.6); G = Math.round(G + (255 - G) * 0.6); B = Math.round(B + (255 - B) * 0.6);
-      }
-      g.globalAlpha = stage === 'todo' ? 0.1 : 1;
-      g.fillStyle = `rgb(${R},${G},${B})`;
-      g.beginPath(); g.arc(cx, cy, rad, 0, Math.PI * 2); g.fill();
-      g.lineWidth = 1; g.strokeStyle = stage === 'done' ? 'rgba(0,0,0,.2)' : 'rgba(0,0,0,.28)'; g.stroke();
-      const lum = 0.299 * R + 0.587 * G + 0.114 * B;
-      g.fillStyle = lum > 200 ? 'rgba(0,0,0,.14)' : 'rgba(255,255,255,.55)';
-      g.beginPath(); g.arc(cx, cy, hole, 0, Math.PI * 2); g.fill();
-      g.globalAlpha = 1;
-    }
-  }
-  // 外框 + 每 5 格的辅助线（位置按拼豆板尺寸，见 guideLines；镜像时跟着翻过来）
-  g.strokeStyle = '#7d858f'; g.lineWidth = 1.6;
-  g.beginPath();
-  const vx = [0, cols, ...guideLines(cols, P.native).map(c => (P.mirror ? cols - c : c))];
-  for (const c of vx) { g.moveTo(M + c * CELL, M); g.lineTo(M + c * CELL, M + rows * CELL); }
-  for (const r of [0, rows, ...guideLines(rows, P.native)]) { g.moveTo(M, M + r * CELL); g.lineTo(M + cols * CELL, M + r * CELL); }
-  g.stroke();
-  // 坐标：1、5、10、15…
-  g.fillStyle = '#6b6f75'; g.font = `600 9px -apple-system, "PingFang SC", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-  for (let c = 1; c <= cols; c++) if (c === 1 || c % 5 === 0) g.fillText(String(c), M + (c - 0.5) * CELL, M / 2);
-  g.textAlign = 'right';
-  for (let r = 1; r <= rows; r++) if (r === 1 || r % 5 === 0) g.fillText(String(r), M - 4, M + (r - 0.5) * CELL);
-}
-
-// ---------- 固定在边上的行号、列号 ----------
-
-/**
- * 放大后，画布上自带的行号（左边）、列号（上边）会移出屏幕：在舞台边上盖三条尺子，
- * 跟着缩放平移实时重画——左边行号、上边列号。
- * 画布自带的那排数字还在屏幕里时，对应的尺子不显示。
- */
-function makeRulers(stage, P) {
-  const TH = 20, LW = 28;
-  const top = h('canvas.bd-ruler.top'), left = h('canvas.bd-ruler.left');
-  for (const c of [top, left]) c.style.display = 'none';
-  let raf = 0, last = null;
-  const font = w => `${w} 10px -apple-system, "PingFang SC", sans-serif`;
-  const prep = (cv, w, hh) => {
-    const dpr = Math.min(3, window.devicePixelRatio || 1);
-    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(hh * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(hh * dpr); }
-    cv.style.width = w + 'px'; cv.style.height = hh + 'px'; cv.style.display = '';
-    const g = cv.getContext('2d');
-    g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g.clearRect(0, 0, w, hh);
-    g.fillStyle = 'rgba(247,246,243,.95)'; g.fillRect(0, 0, w, hh);
-    return g;
-  };
-  // 格子在屏幕上多大决定隔几格标一个数（数字至少要 ~16 像素宽）
-  const stepFor = px => (px >= 16 ? 1 : px * 5 >= 18 ? 5 : 10);
-  function draw(st) {
-    const sw = stage.clientWidth, sh = stage.clientHeight, cs = CELL * st.s;
-    // 画布自带的数字（上边中线 M/2、左边右对齐到 M-4）移出屏幕了才盖尺子，不挡住没放大时的豆子
-    const showTop = st.ty + (M / 2) * st.s < 4;
-    const showLeft = st.tx + (M - 10) * st.s < 2;
-    const x0 = showLeft ? LW : 0, y0 = showTop ? TH : 0, x1 = sw;
-    if (showTop) {
-      const g = prep(top, sw, TH), step = stepFor(cs);
-      g.strokeStyle = 'rgba(0,0,0,.14)'; g.lineWidth = 1;
-      g.beginPath(); g.moveTo(0, TH - 0.5); g.lineTo(sw, TH - 0.5); g.stroke();
-      g.textAlign = 'center'; g.textBaseline = 'middle';
-      for (let c = 0; c < P.W; c++) {
-        const n = c + 1;
-        if (!(step === 1 || n % step === 0 || (n === 1 && step === 5))) continue;
-        const x = st.tx + (M + (c + 0.5) * CELL) * st.s;
-        if (x < x0 + 6 || x > x1 - 6) continue;
-        g.font = font(n % 5 === 0 ? 700 : 500); g.fillStyle = n % 5 === 0 ? '#3a3d42' : '#80848a';
-        g.fillText(String(n), x, TH / 2 + 1);
-      }
-    } else top.style.display = 'none';
-    if (showLeft) {
-      const g = prep(left, LW, sh), step = stepFor(cs);
-      g.strokeStyle = 'rgba(0,0,0,.14)'; g.lineWidth = 1;
-      g.beginPath(); g.moveTo(LW - 0.5, 0); g.lineTo(LW - 0.5, sh); g.stroke();
-      g.textAlign = 'right'; g.textBaseline = 'middle';
-      for (let r = 0; r < P.H; r++) {
-        const n = r + 1;
-        if (!(step === 1 || n % step === 0 || (n === 1 && step === 5))) continue;
-        const y = st.ty + (M + (r + 0.5) * CELL) * st.s;
-        if (y < y0 + 5 || y > sh - 5) continue;
-        g.font = font(n % 5 === 0 ? 700 : 500); g.fillStyle = n % 5 === 0 ? '#3a3d42' : '#80848a';
-        g.fillText(String(n), LW - 5, y);
-      }
-      if (showTop) { g.fillStyle = 'rgba(247,246,243,1)'; g.fillRect(0, 0, LW, TH); } // 左上角的空角
-    } else left.style.display = 'none';
-  }
-  return {
-    els: [top, left],
-    update(st) { last = { s: st.s, tx: st.tx, ty: st.ty }; if (!raf) raf = requestAnimationFrame(() => { raf = 0; if (stage.isConnected) draw(last); }); },
-  };
 }
 
 // ---------- 修正格子 ----------
@@ -511,6 +226,7 @@ function menu(app, p) {
   const hasBoard = !!(p.board && !p.boardSkip); // 选了“不用拼豆板”时没有拼豆板的那些功能
   const s = sheet(h('div.menu',
     hasImg ? h('button', { onclick: () => { s.close(); openImageViewer(entriesFromImages(p.images), { view: 'full', focus: false }); } }, '🖼 看原图') : null,
+    hasBoard ? h('button', { onclick: () => { s.close(); ipadSheet(app, p, buildItems(p, app.settings)); } }, '📲 在 iPad 上拼（扫码）') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); bs.edit = !bs.edit; app.rerender(); } }, bs.edit ? '✏️ 退出修正模式' : '✏️ 修正格子颜色') : null,
     hasBoard && hasImg ? h('button', { onclick: () => { s.close(); reviewFlow(app, p); } }, '🔍 核对拼豆板（相近色、没把握的格子）') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); compareSheet(p); } }, '📊 拼豆板和清单对一对') : null,
@@ -782,7 +498,15 @@ function endSheet(app, p) {
   const seg = h('div.seg',
     h('button.on', { onclick: e => { keep = true; seg.children[0].classList.add('on'); seg.children[1].classList.remove('on'); } }, '以后接着拼'),
     h('button', { onclick: e => { keep = false; seg.children[1].classList.add('on'); seg.children[0].classList.remove('on'); } }, '这次不拼了'));
+  const ipadRow = sentToIpad(p) && p.board && !p.boardSkip ? h('div.end-sec.end-ipad',
+    h('div.small', h('b', '📲 在 iPad 上打的勾')),
+    h('div.tiny.muted', '先把 iPad 的进度扫回来，下面才知道哪些颜色拼好了（已经扫过就不用了）'),
+    h('button.btn.sm.soft', { style: { marginTop: '6px' }, onclick: async () => {
+      s.close();
+      if (await scanProgress(app, p, buildItems(p, app.settings))) endSheet(app, await store.getPattern(p.id));
+    } }, '📷 扫 iPad 上的进度码')) : null;
   const s = sheet([
+    ipadRow,
     h('div.end-sec',
       h('div.small', h('b', '✅ 已拼好的颜色：扣减库存'), h('span.muted', '（拼上去的豆子挑不下来）')),
       doneRows.length ? h('div.row.wrap.gap-s', { style: { marginTop: '6px' } }, doneRows.map(r => h('span.end-chip', chip(r.code, { size: 'sm' }), `×${fmtNum(r.left)}`)))

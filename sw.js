@@ -1,6 +1,6 @@
 // Service Worker：把应用文件缓存到手机上，没网也能打开（云端大模型识别仍需联网）。
 // 每次发布新版本时把 VERSION 改一下（和 js/version.js 的 APP_VERSION 一致），手机打开 App 时会自动换成新版本。
-const VERSION = 'pindou-v2.6.4';
+const VERSION = 'pindou-v2.7.0';
 const SHELL = [
   './',
   './index.html',
@@ -21,6 +21,14 @@ const SHELL = [
   './js/ocrcells.js',
   './js/stitch.js',
   './js/merge.js',
+  './js/boardview.js',
+  './js/transfer.js',
+  './js/qr.js',
+  './js/views/ipad-send.js',
+  './js/ipad.js',
+  './ipad.html',
+  './ipad.webmanifest',
+  './vendor/qr/qrcode.mjs',
   './js/views/boardsetup.js',
   './js/boardasync.js',
   './js/boardworker.js',
@@ -50,10 +58,10 @@ self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
-// 识别引擎和模型（几 MB 到十几 MB）单独放一个缓存：第一次用到时下载，之后一直用缓存，
+// 识别引擎和模型（几 MB 到十几 MB）、扫码引擎单独放一个缓存：第一次用到时下载，之后一直用缓存，
 // 发新版本也不会重新下载（文件名里的版本号变了才会换）
 const MODEL_CACHE = 'pindou-models-v1';
-const isModel = url => /\/vendor\/(ppocr|ort|tesseract)\//.test(url.pathname);
+const isModel = url => /\/vendor\/(ppocr|ort|tesseract|zxing)\//.test(url.pathname); // zxing：扫二维码（约 1 MB）
 
 self.addEventListener('activate', e => {
   e.waitUntil(

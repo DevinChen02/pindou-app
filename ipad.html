@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="拼豆看板">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#f6f4f0" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#18181a" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="ipad.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/app.css">
+<title>拼豆看板</title>
+</head>
+<!-- iPad 看板：扫 iPhone 上“开始拼豆 → 📲 iPad”的二维码，把拼豆板放大照着拼。库存和图纸只在 iPhone 上。 -->
+<body class="ipad-app">
+<header id="topbar">
+  <button id="back-btn" class="icon-btn" aria-label="返回" hidden>
+    <svg viewBox="0 0 24 24" width="22" height="22"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+  <h1 id="title">拼豆看板</h1>
+  <div id="top-actions"></div>
+</header>
+<main id="view"><div class="loading">加载中…</div></main>
+<script type="module" src="js/ipad.js"></script>
+</body>
+</html>
