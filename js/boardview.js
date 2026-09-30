@@ -248,7 +248,7 @@ export function viewSheet(settings, save) {
  *   extra：盖在舞台上的其他元素（比如修正模式的提示条）
  * 返回 { stage, pz }（离开页面时调 pz.destroy()）
  */
-export function boardStage({ board, place, sel, done, show, spot, onMirror, onSpot, onTap, view = null, info: infoState = null, extra = [] }) {
+export function boardStage({ board, place, sel, done, show, spot, onMirror, onSpot, onTap, view = null, info: infoState = null, extra = [], mark = null }) {
   const stage = h('div.bd-stage');
   const layer = h('div.bd-layer');
   const canvas = h('canvas');
@@ -265,6 +265,10 @@ export function boardStage({ board, place, sel, done, show, spot, onMirror, onSp
   // 放大后行号、列号固定在左边、上边
   const rulers = makeRulers(stage, place);
   stage.append(layer, ...rulers.els, info, zoomBar, ...extra);
+  // 修正格子时点中的那一格：红框闪一闪（px, py 是拼豆板上的位置，镜像时已经翻过来了）
+  // （红框的粗细按屏幕算，放大了也不会变成一大圈：缩放时更新 --k = 1/缩放倍数）
+  const markEl = mark ? h('div.bd-mark', { style: { left: (M + mark.px * CELL) + 'px', top: (M + mark.py * CELL) + 'px', width: CELL + 'px', height: CELL + 'px' } }) : null;
+  if (markEl) layer.append(markEl);
   const { W, H } = boardSize(place);
   const q = Math.max(1, Math.min(2.5, Math.sqrt(9e6 / (W * H))));
   canvas.width = Math.round(W * q); canvas.height = Math.round(H * q);
@@ -281,7 +285,7 @@ export function boardStage({ board, place, sel, done, show, spot, onMirror, onSp
   if (last && last.until > Date.now()) showInfo(last.text, last.until);
   pz = createPanZoom(stage, layer, {
     maxFit: 14,
-    onChange: st => rulers.update(st),
+    onChange: st => { rulers.update(st); markEl?.style.setProperty('--k', String(1 / st.s)); },
     onTap: ({ x, y }) => {
       // 点的是拼豆板上第几行第几列（镜像时左右反过来），再换回图纸网格里的那一格
       const px = Math.floor((x - M) / CELL), py = Math.floor((y - M) / CELL);
@@ -299,6 +303,15 @@ export function boardStage({ board, place, sel, done, show, spot, onMirror, onSp
     // 换颜色、打勾后重画：保持原来的缩放位置
     const st = view?.get();
     if (st) { Object.assign(pz.state, st); pz.zoomAt(pz.state.s, 0, 0); }
+    // 点中的格子被挤到屏幕外了（下面换成了改颜色的面板，舞台变矮）：挪到刚好看得见
+    if (mark) {
+      // 上边、左边让开固定的行列号，下边让开缩放按钮
+      const { s, tx, ty } = pz.state, sw = stage.clientWidth, sh = stage.clientHeight;
+      const x0 = tx + (M + mark.px * CELL) * s, y0 = ty + (M + mark.py * CELL) * s, x1 = x0 + CELL * s, y1 = y0 + CELL * s;
+      const dx = x0 < 36 ? 36 - x0 : x1 > sw - 12 ? sw - 12 - x1 : 0;
+      const dy = y0 < 30 ? 30 - y0 : y1 > sh - 64 ? sh - 64 - y1 : 0;
+      if (dx || dy) { pz.state.tx += dx; pz.state.ty += dy; pz.zoomAt(pz.state.s, 0, 0); view?.set({ s: pz.state.s, tx: pz.state.tx, ty: pz.state.ty }); }
+    }
   });
   // 记住缩放位置（换颜色重画时不跳回去）
   if (view) {

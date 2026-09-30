@@ -92,6 +92,7 @@ export function components(M, w, h) {
     }
     comps.push({ x0, y0, x1: x1 + 1, y1: y1 + 1, w: x1 - x0 + 1, h: y1 - y0 + 1, area });
   }
+  comps.label = label; // 第 k 个连通域的像素标签是 k+1
   return comps;
 }
 
@@ -156,9 +157,12 @@ export function groupWords(comps, hc) {
  * 其余像素与“最近的大片区域”的颜色差即为 D（越大越像字）。
  * 字内的空洞（0、8、A 的中间）颜色和所在色块一样，不会被当成字。
  */
-export function textDistance(img, k = 4, tol = 14) {
-  const { data, width: w, height: h } = img;
+export function textDistance(img, k = 4, tol = 14, opt = {}) {
+  const { width: w, height: h } = img;
   const n = w * h;
+  const src = img.data;
+  // 分区域用的图：可选先 3×3 平均（压掉 JPEG 噪点），算“字离背景多远”仍用原图
+  const data = opt.smooth ? smooth3(src, w, h) : src;
   const parent = new Int32Array(n);
   for (let i = 0; i < n; i++) parent[i] = i;
   const find = i => {
@@ -186,14 +190,14 @@ export function textDistance(img, k = 4, tol = 14) {
         && root[i - k - k * w] === r && root[i + k + k * w] === r) core[r]++;
     }
   }
-  const isBg = r => core[r] >= 12;
+  const isBg = r => core[r] >= (opt.minCore ?? 12);
   const sum = new Map();
   for (let i = 0; i < n; i++) {
     const r = root[i];
     if (!isBg(r)) continue;
     let s = sum.get(r);
     if (!s) { s = [0, 0, 0, 0]; sum.set(r, s); }
-    s[0] += data[i * 4]; s[1] += data[i * 4 + 1]; s[2] += data[i * 4 + 2]; s[3]++;
+    s[0] += src[i * 4]; s[1] += src[i * 4 + 1]; s[2] += src[i * 4 + 2]; s[3]++;
   }
   // 多源 BFS：每个像素归到最近的背景区域
   const bgOf = new Int32Array(n).fill(-1);
@@ -211,10 +215,26 @@ export function textDistance(img, k = 4, tol = 14) {
   for (let i = 0; i < n; i++) {
     if (isBg(root[i]) || bgOf[i] < 0) continue;
     const s = sum.get(bgOf[i]);
-    const dr = data[i * 4] - s[0] / s[3], dg = data[i * 4 + 1] - s[1] / s[3], db = data[i * 4 + 2] - s[2] / s[3];
+    const dr = src[i * 4] - s[0] / s[3], dg = src[i * 4 + 1] - s[1] / s[3], db = src[i * 4 + 2] - s[2] / s[3];
     D[i] = Math.sqrt((dr * dr + dg * dg + db * db) / 3);
   }
   return D;
+}
+
+/** 3×3 平均（RGB） */
+function smooth3(data, w, h) {
+  const out = new Uint8ClampedArray(data.length);
+  for (let y = 0; y < h; y++) {
+    const ya = Math.max(0, y - 1), yb = Math.min(h - 1, y + 1);
+    for (let x = 0; x < w; x++) {
+      const xa = Math.max(0, x - 1), xb = Math.min(w - 1, x + 1);
+      let r = 0, g = 0, b = 0, c = 0;
+      for (let yy = ya; yy <= yb; yy++) for (let xx = xa; xx <= xb; xx++) { const p = (yy * w + xx) * 4; r += data[p]; g += data[p + 1]; b += data[p + 2]; c++; }
+      const q = (y * w + x) * 4;
+      out[q] = r / c; out[q + 1] = g / c; out[q + 2] = b / c; out[q + 3] = 255;
+    }
+  }
+  return out;
 }
 
 function maskOf(D, T) {
@@ -224,14 +244,95 @@ function maskOf(D, T) {
 }
 
 /**
+ * 补救没认成背景的色块：噪点太多（低质量 JPEG、缩小过）的色块会整块被当成“字”，和里面的色号连成一大团，
+ * 后面又被当成边框扔掉，色号就丢了。对这种“实心的一大团”：取它自己像素里最多的颜色当色块底色，
+ * 和底色差得多的像素才是字；拆出来的像一排字（大小合适、不碰边、上下对齐）就换成这些字，否则原样保留。
+ * 同时把这块的 D 改成“离色块底色多远”，Tesseract 那条路（wordImage）也能用。
+ */
+function rescueSwatches(img, D, comps, W) {
+  const { data } = img, label = comps.label;
+  const out = [];
+  comps.forEach((a, k) => {
+    if (!(a.h >= 12 && a.area >= 150 && a.area / (a.w * a.h) >= 0.3)) { out.push(a); return; }
+    const id = k + 1;
+    // 色块是实心的一块：外框一圈基本都是这一团自己的像素；一串粘连的字外框大多是空白，不动
+    let edge = 0, edgeIn = 0;
+    for (let x = a.x0; x < a.x1; x++) for (const y of [a.y0, a.y1 - 1]) { edge++; if (label[y * W + x] === id) edgeIn++; }
+    for (let y = a.y0 + 1; y < a.y1 - 1; y++) for (const x of [a.x0, a.x1 - 1]) { edge++; if (label[y * W + x] === id) edgeIn++; }
+    if (edgeIn < edge * 0.5) { out.push(a); return; }
+    // 这团像素里最多的颜色（每通道 5 位量化）
+    const bins = new Map();
+    for (let y = a.y0; y < a.y1; y++) for (let x = a.x0; x < a.x1; x++) {
+      const i = y * W + x;
+      if (label[i] !== id) continue;
+      const p = i * 4, key = (data[p] >> 3) << 10 | (data[p + 1] >> 3) << 5 | (data[p + 2] >> 3);
+      let b = bins.get(key); if (!b) { b = [0, 0, 0, 0]; bins.set(key, b); }
+      b[0] += data[p]; b[1] += data[p + 1]; b[2] += data[p + 2]; b[3]++;
+    }
+    // 相邻的量化格（每通道 ±2 格）一起算：噪点会把同一种颜色分到几个格里
+    let best = null, bestN = 0;
+    for (const [key, b] of bins) {
+      const r = key >> 10, g = (key >> 5) & 31, bl = key & 31;
+      let n = 0;
+      for (const [k2, b2] of bins) if (Math.abs((k2 >> 10) - r) <= 2 && Math.abs(((k2 >> 5) & 31) - g) <= 2 && Math.abs((k2 & 31) - bl) <= 2) n += b2[3];
+      if (n > bestN) { bestN = n; best = b; }
+    }
+    if (!best || bestN < a.area * 0.25) { out.push(a); return; }
+    const bg = [best[0] / best[3], best[1] / best[3], best[2] / best[3]];
+    const w = a.w, h = a.h;
+    const dist = new Float32Array(w * h), M = new Uint8Array(w * h);
+    // 框里所有像素都算（色块没认成背景时，色块上的白字离页面白底很近，根本不在这一团里，是这一团里的“洞”）
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const p = ((a.y0 + y) * W + a.x0 + x) * 4, dr = data[p] - bg[0], dg = data[p + 1] - bg[1], db = data[p + 2] - bg[2];
+      dist[y * w + x] = Math.sqrt((dr * dr + dg * dg + db * db) / 3);
+    }
+    // 字和底色的分界：底色像素离底色很近，字很远；取 45 和“最远的一成”的一半里大的那个
+    const vals = [...dist].filter(v => v > 0).sort((u, v) => u - v);
+    const thr = Math.max(40, (vals[Math.floor(vals.length * 0.9)] || 0) * 0.5);
+    for (let i = 0; i < w * h; i++) M[i] = dist[i] > thr ? 1 : 0;
+    const parts = components(M, w, h), pl = parts.label;
+    // 色块上的字四周都是色块（这一团自己的像素）；字本身的毛边四周有一半是外面
+    const enclosed = (c, j) => {
+      let inside = 0, all = 0;
+      for (let y = Math.max(0, c.y0 - 1); y < Math.min(h, c.y1 + 1); y++) for (let x = Math.max(0, c.x0 - 1); x < Math.min(w, c.x1 + 1); x++) {
+        if (pl[y * w + x] === j + 1) continue;
+        const near = (x > 0 && pl[y * w + x - 1] === j + 1) || (x < w - 1 && pl[y * w + x + 1] === j + 1) || (y > 0 && pl[(y - 1) * w + x] === j + 1) || (y < h - 1 && pl[(y + 1) * w + x] === j + 1);
+        if (!near) continue;
+        all++;
+        if (label[(a.y0 + y) * W + a.x0 + x] === id) inside++;
+      }
+      return all > 0 && inside / all >= 0.6;
+    };
+    const chars = parts.filter((c, j) => c.h >= h * 0.3 && c.h <= h * 0.92 && c.w <= c.h * 1.6 && c.area >= 8
+      && c.x0 > 0 && c.y0 > 0 && c.x1 < w && c.y1 < h && enclosed(c, j));
+    const cys = chars.map(c => (c.y0 + c.y1) / 2);
+    const aligned = chars.length && Math.max(...cys) - Math.min(...cys) <= h * 0.25;
+    const inkArea = chars.reduce((t, c) => t + c.area, 0);
+    // 色号至少两个字（字母 + 数字）；色块比字高一截
+    const tall = Math.max(0, ...chars.map(c => c.h));
+    if (!aligned || chars.length < 2 || chars.length > 6 || inkArea < a.area * 0.05 || h < tall * 1.15) { out.push(a); return; }
+    for (const c of chars) out.push({ ...c, x0: c.x0 + a.x0, x1: c.x1 + a.x0, y0: c.y0 + a.y0, y1: c.y1 + a.y0 });
+    const keep = new Set(chars.map(c => parts.indexOf(c) + 1));
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (a.y0 + y) * W + a.x0 + x, j = y * w + x;
+      if (keep.has(pl[j])) D[i] = Math.max(D[i], dist[j]);
+      else if (label[i] === id) D[i] = 0;
+    }
+  });
+  return out;
+}
+
+/**
  * 分析一张清单图：分割 → 连通域 → 按行聚类（每行有自己的字高，不同大小的字互不影响）→ 拼成词。
  * 返回 { words:[{x0,y0,x1,y1,n,hc,parts}], D, T, width, height }（原图坐标）
  */
-export function analyze(img) {
+export function analyze(img, opt = {}) {
   const T = 30;
-  const D = textDistance(img, 4);
+  // k=3：色块小、字大、色块上还有 JPEG 噪点时，色块也要能认成“背景”（k=4 时珍珠兔兔那张 29 色只认出 19 色）
+  const D = textDistance(img, opt.k ?? 3, opt.tol ?? 14, opt);
   const W = img.width, H = img.height;
-  let comps = components(maskOf(D, T), W, H)
+  const raw = components(maskOf(D, T), W, H);
+  let comps = (opt.rescue === false ? raw : rescueSwatches(img, D, raw, W))
     .filter(c => c.h >= 5 && c.h <= H * 0.6 && c.w <= c.h * 6 && c.area >= 6 && !(c.h < 8 && c.w < 3));
   // 去掉色块/格子的边框：很“空”的大连通域，或者里面套着别的连通域的
   comps = comps.filter(a => {
@@ -576,6 +677,31 @@ export function pairWords(words, normalizeCode) {
       countBox: { x0: t.x0, y0: t.y0, x1: t.x1, y1: t.y1 }, uncertain: true,
     });
   });
+  // 还有读出了数量、色号那里连字都没找到的（色块太花、字太淡）：照同一张清单里其他“色号→数量”的相对位置，
+  // 在该有色号的地方留一个“待填色号”的条目（核对时按色块颜色给建议），不让它悄悄漏掉
+  const done = items.filter(it => it.code && it.countBox);
+  if (done.length >= 3) {
+    const off = f => median(done.map(f));
+    const dx = off(it => (it.countBox.x0 + it.countBox.x1) / 2 - (it.codeBox.x0 + it.codeBox.x1) / 2);
+    const dy = off(it => (it.countBox.y0 + it.countBox.y1) / 2 - (it.codeBox.y0 + it.codeBox.y1) / 2);
+    const cw = off(it => it.codeBox.x1 - it.codeBox.x0), ch = off(it => it.codeBox.y1 - it.codeBox.y0);
+    const takenT = new Set(items.map(it => it.countBox && `${it.countBox.x0},${it.countBox.y0}`));
+    const th = off(it => it.countBox.y1 - it.countBox.y0);
+    counts.forEach((t, j) => {
+      if (takenT.has(`${t.x0},${t.y0}`) || (support[j] === 1 && medSupport >= 3) || support[j] < maxSupport * 0.5) return;
+      if (t.conf != null && t.conf < 40) return;
+      // 只补在“已经配好的数量”那几行里、字一样大的（格子边上的坐标刻度、别处的数字不算）
+      const h = t.y1 - t.y0, tcy = (t.y0 + t.y1) / 2;
+      if (h < th * 0.7 || h > th * 1.4) return;
+      if (!done.some(it => Math.abs((it.countBox.y0 + it.countBox.y1) / 2 - tcy) < th * 0.5)) return;
+      const cx = (t.x0 + t.x1) / 2 - dx, cy = (t.y0 + t.y1) / 2 - dy;
+      const box = { x0: cx - cw / 2, y0: cy - ch / 2, x1: cx + cw / 2, y1: cy + ch / 2 };
+      // 那个位置已经有别的条目（比如色号读出来了、只是没配上这个数）就不补
+      if (items.some(it => it.codeBox.x0 < box.x1 && it.codeBox.x1 > box.x0 && it.codeBox.y0 < box.y1 && it.codeBox.y1 > box.y0)) return;
+      if (box.x0 < 0 || box.y0 < 0) return;
+      items.push({ code: null, rawCode: '?', count: t.n, codeBox: box, countBox: { x0: t.x0, y0: t.y0, x1: t.x1, y1: t.y1 }, uncertain: true, inferred: true });
+    });
+  }
   const hMed = median(items.map(it => it.codeBox.y1 - it.codeBox.y0)) || 10;
   items.sort((a, b) => {
     const dy = a.codeBox.y0 - b.codeBox.y0;

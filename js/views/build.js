@@ -92,7 +92,7 @@ export function reviewCount(board) {
 export async function renderBuild(app) {
   const p = await store.getPattern(app.pat.id);
   if (!p) { app.pat.page = 'list'; return app.render(); }
-  if (bs.pid !== p.id) Object.assign(bs, { pid: p.id, sel: null, edit: false, trayScroll: null, view: null, info: null });
+  if (bs.pid !== p.id) Object.assign(bs, { pid: p.id, sel: null, edit: false, editCell: null, trayScroll: null, view: null, info: null });
   document.body.classList.add('mode-build');
   app.setTitle(p.name || '拼豆');
   app.setBack(() => { bs.edit = false; goPattern(app, p.id); });
@@ -115,22 +115,30 @@ export async function renderBuild(app) {
   const boardCount = board ? cellCounts(board) : new Map();
 
   // ---- 拼豆板 ----
-  let stage;
+  let stage, editBar = null;
+  const editing = !!board && bs.edit;
+  if (!editing) bs.editCell = null;
   if (board) {
-    const editBar = bs.edit ? h('div.bd-editbar', h('span', '✏️ 修正模式：点格子改颜色'), h('button.btn.sm', { onclick: () => { bs.edit = false; app.rerender(); } }, '完成')) : null;
+    // 修正模式的提示条放在拼豆板上面（不盖住格子，放大了第一行也点得到）
+    if (editing) editBar = h('div.bd-editbar', h('span', '✏️ 修正模式：点格子，在下面选颜色'), h('button.btn.sm', { onclick: () => { bs.edit = false; bs.editCell = null; app.rerender(); } }, '完成'));
     // （核对没把握的格子在“准备拼豆板 → 颜色”那一步做；拼的时候想再核对：⋯ → 核对拼豆板）
     const st = boardStage({
       board, place: placeOf(board), sel: bs.sel, done, show, spot,
+      mark: editing && bs.editCell ? bs.editCell : null,
       onMirror: () => toggleMirror(app, p),
       onSpot: () => toggleSpot(app),
       onTap: (cell, showInfo) => {
-        if (bs.edit) { if (cell.inGrid) editCell(app, p, board, cell.r, cell.c, cell.where); else toast('这里在图纸外面，是拼豆板的空位'); return; }
+        if (bs.edit) {
+          if (!cell.inGrid) { toast('这里在图纸外面，是拼豆板的空位'); return; }
+          bs.editCell = { r: cell.r, c: cell.c, px: cell.px, py: cell.py };
+          app.rerender();
+          return;
+        }
         showInfo(`${cell.where} · ${cell.code || '空'}`, Date.now() + 2200);
         if (cell.code && cell.code !== bs.sel && items.some(i => i.code === cell.code)) { bs.sel = cell.code; app.rerender(); }
       },
       view: { get: () => (bs.view?.pid === p.id ? bs.view.st : null), set: st => { bs.view = { pid: p.id, st }; } },
       info: { get: () => (bs.info?.pid === p.id ? bs.info : null), set: v => { bs.info = { pid: p.id, ...v }; } },
-      extra: editBar ? [editBar] : [],
     });
     stage = st.stage;
     app.onLeave = () => st.pz.destroy();
@@ -141,6 +149,11 @@ export async function renderBuild(app) {
       p.boardError ? h('p.small.muted', `原因：${p.boardError}`) : null,
       h('p.small.muted', '下面按颜色打勾也能记录进度。'),
       hasImg ? h('button.btn.soft', { onclick: async () => { startSetup(p, 'frame'); await store.patchPattern(p.id, { boardSkip: false }); app.rerender(); } }, '🔲 框出拼豆板，生成拼豆板') : null));
+  }
+
+  if (editing) {
+    view.append(editBar, stage, editPanel(app, p, board));
+    return;
   }
 
   // ---- 底部：颜色列表 + 操作 ----
@@ -191,32 +204,57 @@ async function toggleMirror(app, p) {
 
 // ---------- 修正格子 ----------
 
-let saveTimer = null;
-function editCell(app, p, board, r, c, where = null) {
-  const i = r * board.cols + c;
+/** 原图上这一格的放大图（找原图、裁图要一点时间：原图读一次就留着） */
+async function cellCropOf(p, board, i) {
+  const im = (p.images || []).find(x => x.fullId === board.imageId);
+  if (!im || !board.geom) return null;
+  if (bs.pix?.pid !== p.id || bs.pix.imageId !== board.imageId) bs.pix = { pid: p.id, imageId: board.imageId, canvas: (await loadPixels(im)).canvas };
+  return cellCrop(bs.pix.canvas, geomOf(board), board.cols, i, 76);
+}
+
+/** 修正模式底部的面板：点中的是哪一格（原图放大、现在的颜色），下面直接选要改成的颜色 */
+function editPanel(app, p, board) {
+  const ec = bs.editCell;
+  const panel = h('div.bd-tray.bd-editpanel');
+  if (!ec) {
+    panel.append(h('div.bd-edit-hint', h('b', '点拼豆板上要改的那一格'), h('div.small.muted', '可以先放大再点；点中的格子会有红框')));
+    return panel;
+  }
+  const i = ec.r * board.cols + ec.c;
   const cur = board.cells[i];
-  const items = merged(p);
-  const set = async code => {
-    s.close();
-    let idx = code ? board.codes.indexOf(code) + 1 : 0;
-    const codes = [...board.codes];
-    if (code && !idx) { codes.push(code); idx = codes.length; }
-    board.cells[i] = idx;
-    board.codes = codes;
-    clearTimeout(saveTimer);
-    // 改过的格子记成“锁定”：以后重新生成、重新计算都按它来
-    await store.patchPattern(p.id, pp => {
-      const locks = (pp.board.locks || []).filter(([j]) => j !== i);
-      locks.push([i, code || '']);
-      return { ...pp, board: { ...pp.board, codes, cells: packCells(board.cells), edits: (pp.board.edits || 0) + 1, locks } };
-    });
-    app.rerender();
-  };
-  const s = sheet([
-    h('p.small.muted', { style: { margin: '0 2px 10px' } }, `${where || `第 ${r + 1} 行 · 第 ${c + 1} 列`}，现在是 ${cur ? board.codes[cur - 1] : '空'}。改成：`),
-    h('div.code-grid', items.map(it => h('button.code-cell' + (cur && board.codes[cur - 1] === it.code ? '.on' : ''), { onclick: () => set(it.code) }, chip(it.code, { size: 'sm' }))),
-      h('button.code-cell' + (!cur ? '.on' : ''), { onclick: () => set(null) }, h('span.chip.sm.empty', '空'))),
-  ], { title: '改这一格' });
+  const curCode = cur ? board.codes[cur - 1] : null;
+  const where = `第 ${ec.py + 1} 行 · 第 ${ec.px + 1} 列`;
+  const crop = h('div.bd-edit-crop');
+  cellCropOf(p, board, i).then(cv => { if (cv) crop.append(cv); else crop.remove(); }).catch(() => crop.remove());
+  const codes = merged(p).map(it => it.code);
+  if (curCode && !codes.includes(curCode)) codes.push(curCode);
+  panel.append(
+    h('div.bd-edit-head', crop,
+      h('div.grow',
+        h('div', h('b', where)),
+        h('div.small.muted.bd-edit-now', '现在是 ', curCode ? chip(curCode, { size: 'sm' }) : h('span.chip.sm.empty', '空'), ' 改成：'))),
+    h('div.code-grid.bd-edit-codes',
+      codes.map(code => h('button.code-cell' + (code === curCode ? '.on' : ''), { 'data-code': code, onclick: () => setCell(app, p, board, i, code, where) }, chip(code, { size: 'sm' }))),
+      h('button.code-cell' + (!cur ? '.on' : ''), { 'data-code': '', onclick: () => setCell(app, p, board, i, null, where) }, h('span.chip.sm.empty', '空'))));
+  return panel;
+}
+
+/** 把一格改成 code（null = 空）；改过的格子记成“锁定”：以后重新生成、重新计算都按它来 */
+async function setCell(app, p, board, i, code, where) {
+  const cur = board.cells[i];
+  if ((cur ? board.codes[cur - 1] : null) === code) return;
+  let idx = code ? board.codes.indexOf(code) + 1 : 0;
+  const codes = [...board.codes];
+  if (code && !idx) { codes.push(code); idx = codes.length; }
+  board.cells[i] = idx;
+  board.codes = codes;
+  await store.patchPattern(p.id, pp => {
+    const locks = (pp.board.locks || []).filter(([j]) => j !== i);
+    locks.push([i, code || '']);
+    return { ...pp, board: { ...pp.board, codes, cells: packCells(board.cells), edits: (pp.board.edits || 0) + 1, locks } };
+  });
+  toast(`${where} 改成 ${code || '空'}`, 'ok');
+  app.rerender();
 }
 
 // ---------- 菜单 ----------
@@ -227,7 +265,7 @@ function menu(app, p) {
   const s = sheet(h('div.menu',
     hasImg ? h('button', { onclick: () => { s.close(); openImageViewer(entriesFromImages(p.images), { view: 'full', focus: false }); } }, '🖼 看原图') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); ipadSheet(app, p, buildItems(p, app.settings)); } }, '📲 在 iPad 上拼（扫码）') : null,
-    hasBoard ? h('button', { onclick: () => { s.close(); bs.edit = !bs.edit; app.rerender(); } }, bs.edit ? '✏️ 退出修正模式' : '✏️ 修正格子颜色') : null,
+    hasBoard ? h('button', { onclick: () => { s.close(); bs.edit = !bs.edit; bs.editCell = null; app.rerender(); } }, bs.edit ? '✏️ 退出修正模式' : '✏️ 修正格子颜色') : null,
     hasBoard && hasImg ? h('button', { onclick: () => { s.close(); reviewFlow(app, p); } }, '🔍 核对拼豆板（相近色、没把握的格子）') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); compareSheet(p); } }, '📊 拼豆板和清单对一对') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); toggleMirror(app, p); } }, p.board.place?.mirror ? '⇋ 取消镜像' : '⇋ 镜像（左右翻转）') : null,

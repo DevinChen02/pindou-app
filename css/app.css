@@ -574,7 +574,15 @@ main.build-view { position: fixed; left: 0; right: 0; bottom: 0; top: calc(var(-
 .bd-zoom button { min-width: 40px; height: 38px; border: 0; border-radius: 10px; background: rgba(30,30,32,.72); color: #fff; font-size: 19px; font-weight: 600; cursor: pointer; }
 .bd-zoom button.wide { font-size: 14px; padding: 0 10px; }
 .bd-info { position: absolute; left: 50%; top: 28px; transform: translateX(-50%); background: rgba(30,30,32,.85); color: #fff; font-size: 13.5px; font-weight: 600; padding: 6px 12px; border-radius: 999px; white-space: nowrap; pointer-events: none; }
-.bd-editbar { position: absolute; left: 10px; right: 10px; top: 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--warn-soft); color: var(--warn); border-radius: 12px; padding: 6px 6px 6px 12px; font-size: 14px; font-weight: 650; }
+.bd-editbar { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--warn-soft); color: var(--warn); padding: 6px 10px 6px 14px; font-size: 14px; font-weight: 650; border-bottom: 1px solid var(--line); }
+/* 修正格子：点中的那一格 */
+.bd-mark { --k: 1; position: absolute; box-sizing: border-box; border-radius: calc(4px * var(--k)); outline: calc(3px * var(--k)) solid #ff2d55; outline-offset: calc(1px * var(--k)); box-shadow: 0 0 0 calc(5px * var(--k)) rgba(255,255,255,.85), 0 0 calc(14px * var(--k)) calc(5px * var(--k)) rgba(255,45,85,.7); pointer-events: none; animation: bd-mark 0.9s ease-in-out infinite alternate; }
+@keyframes bd-mark { from { opacity: 1; } to { opacity: .45; } }
+.bd-editpanel { padding: 10px 12px calc(var(--safe-b) + 10px); max-height: 48vh; max-height: 48dvh; overflow-y: auto; }
+.bd-edit-hint { text-align: center; padding: 10px 0 6px; display: flex; flex-direction: column; gap: 4px; }
+.bd-edit-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.bd-edit-crop canvas { display: block; border-radius: 8px; box-shadow: 0 0 0 1px var(--line); }
+.bd-edit-now { margin-top: 3px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .bd-tray { flex-shrink: 0; background: var(--card); border-top: 1px solid var(--line); padding: 8px 0 calc(var(--safe-b) + 8px); box-shadow: 0 -6px 16px -10px rgba(0,0,0,.25); }
 .bd-colors { padding: 2px 12px 6px; }
 .bd-color { position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px; border: 2px solid transparent; background: var(--card-2); border-radius: 12px; padding: 5px 5px 3px; cursor: pointer; min-width: 60px; }
