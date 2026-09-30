@@ -7,6 +7,7 @@ import { orderItems, orderOf, showOf, spotOf, placeOf, viewSheet, boardStage, co
 import { KIND, packPayload, unpackPayload, toFrames } from './transfer.js';
 import { qrShow, scanQR, loadScanner, keepAwake } from './qr.js';
 import { APP_VERSION } from './version.js';
+import { status as licenseStatus, renderGate, readOnlyBanner, readOnlyToast, readOnlyText, watchRevocation } from './license.js';
 window.__appVersion = APP_VERSION;
 
 const KEY = 'pindou-ipad';
@@ -35,6 +36,8 @@ function save() {
   }
 }
 const cur = () => state.boards.find(b => b.id === state.cur) || null;
+// 试用激活（iPad 看板也要自己的激活码）：到期 / 被停用时只能看已经收到的拼豆板，不能扫新的、不能打勾
+let ro = null;
 // 这一次打开期间的界面状态（缩放位置、颜色条滑到哪），不存
 const ui = { onLeave: null, view: new Map(), info: new Map(), scroll: new Map() };
 
@@ -65,6 +68,13 @@ function render() {
   clear(els.view);
   const b = cur();
   if (b) renderBoard(b); else renderHome();
+  if (ro) els.view.prepend(readOnlyBanner(ro, relicense));
+}
+async function relicense() {
+  const st = await licenseStatus();
+  if (!st.ok && !st.readOnly) { location.reload(); return; }
+  ro = st.readOnly ? st : null;
+  render();
 }
 function setTitle(t) { els.title.textContent = t; document.title = t === '拼豆看板' ? t : `${t} · 拼豆看板`; }
 function setBack(fn) { els.back.hidden = !fn; els.back.onclick = fn; }
@@ -76,7 +86,8 @@ function renderHome() {
   els.view.classList.add('ipad-home');
   const list = [...state.boards].sort((a, b) => (b.touched || 0) - (a.touched || 0));
   els.view.append(...[
-    h('div.card.ipad-scan-card',
+    // 只能查看：不能再扫新的拼豆板（上面的横幅说明了原因），只看已经收到的
+    ro ? null : h('div.card.ipad-scan-card',
       h('button.btn.primary.big.ipad-scan', { onclick: scanBoard }, '📷 扫码接收拼豆板'),
       h('p.small.muted', '在 iPhone 的拼豆计数器里：图纸 → 开始拼豆 → 右上角“📲 iPad”，然后把 iPad 的摄像头对准 iPhone 上的二维码。')),
     list.length ? h('div.section-title', '收到的拼豆板') : null,
@@ -92,9 +103,9 @@ function boardRow(b) {
     thumb(b),
     h('div.grow',
       h('b', b.name),
-      h('div.small.muted', `${P.W}×${P.H} · 已拼好 ${n}/${b.items.length} 色`),
+      h('div.small.muted', `${P.H} 行 × ${P.W} 列 · 已拼好 ${n}/${b.items.length} 色`),
       h('div.tiny.muted', `收到于 ${fmtTime(b.got)}`)),
-    h('button.btn.sm.ghost', { onclick: e => { e.stopPropagation(); removeBoard(b); } }, '删除'));
+    ro ? null : h('button.btn.sm.ghost', { onclick: e => { e.stopPropagation(); removeBoard(b); } }, '删除'));
 }
 
 /** 列表里的小图：每格一个像素 */
@@ -123,6 +134,7 @@ function openBoard(id) {
 }
 
 async function removeBoard(b) {
+  if (ro) { readOnlyToast(ro); return; }
   if (!(await confirmDialog(`删除「${b.name}」？`, { ok: '删除', danger: true, detail: '只删 iPad 上的这一份（和 iPad 上打的勾），iPhone 上的图纸和库存不受影响。以后可以在 iPhone 上再扫一次。' }))) return;
   state.boards = state.boards.filter(x => x.id !== b.id);
   if (state.cur === b.id) state.cur = null;
@@ -177,8 +189,9 @@ function renderBoard(b) {
     const it = items.find(i => i.code === b.sel);
     const isDone = done.has(it.code);
     tray.append(selBar({
-      it, boardCount: counts.get(it.code) || 0, isDone, hasBoard: true, show, spot,
+      it, boardCount: counts.get(it.code) || 0, isDone, hasBoard: true, show, spot, readOnly: !!ro,
       onToggle: () => {
+        if (ro) { readOnlyToast(ro); return; }
         if (isDone) b.done = b.done.filter(c => c !== it.code);
         else {
           b.done = [...b.done, it.code];
@@ -230,6 +243,7 @@ async function progressSheet(b) {
 // ---------- 扫码收拼豆板 ----------
 
 export function acceptBoard(obj) {
+  if (ro) throw new Error(readOnlyText(ro));
   if (obj?.t !== 'board' || !(obj.rows > 0) || !(obj.cols > 0) || typeof obj.cells !== 'string' || obj.cells.length !== obj.rows * obj.cols
     || !Array.isArray(obj.codes) || !Array.isArray(obj.items) || !obj.place) throw new Error('拼豆板的内容不完整，再扫一次');
   const old = state.boards.find(x => x.id === obj.id);
@@ -248,6 +262,7 @@ export function acceptBoard(obj) {
 }
 
 async function scanBoard() {
+  if (ro) { readOnlyToast(ro); return; }
   const bytes = await scanQR({
     kind: KIND.board,
     title: '扫 iPhone 上的二维码',
@@ -295,6 +310,18 @@ window.addEventListener('unhandledrejection', e => {
 
 window.__ipad = { state, acceptBoard, render }; // 测试用
 try { navigator.storage?.persist?.().catch(() => {}); } catch { /* 部分浏览器不支持 */ }
-render();
-// 扫码是这里最常用的：先在后台把扫码引擎下好
-setTimeout(() => loadScanner().catch(() => {}), 1500);
+
+let watching = false;
+async function boot() {
+  const st = await licenseStatus().catch(e => { console.warn(e); return { ok: true }; });
+  if (!st.ok && !st.readOnly) { renderGate(st, () => boot(), { title: '拼豆看板', what: 'iPad 看板' }); return; }
+  ro = st.readOnly ? st : null;
+  if (!watching && !st.dev && !st.insecure) {
+    watching = true;
+    watchRevocation(st, nst => { if (!nst.ok && !nst.readOnly) { location.reload(); return; } ro = nst.readOnly ? nst : null; render(); });
+  }
+  render();
+  // 扫码是这里最常用的：先在后台把扫码引擎下好
+  if (!ro) setTimeout(() => loadScanner().catch(() => {}), 1500);
+}
+boot();

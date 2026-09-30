@@ -3,6 +3,7 @@ import { h, clear, toast, sheet, chip, fmtNum, fmtTime, confirmDialog, icon, opt
 import { PALETTE, SERIES, BASE_SERIES, hexOf, normalizeCode, seriesLabel } from '../palette.js';
 import { parseLegendText } from '../extract/text.js';
 import * as store from '../store.js';
+import { readOnlyToast } from '../license.js';
 
 const ui = { filter: 'owned', series: 'all', q: '', tab: 'stock', filtersScroll: 0 };
 
@@ -100,6 +101,7 @@ function sortSheet(app) {
 }
 
 async function editSheet(app, code) {
+  if (app.readOnly) { readOnlyToast(app.readOnly); return; }
   const settings = app.settings;
   const inv = await store.getInventory();
   const rec = inv.get(code);
@@ -144,6 +146,7 @@ async function editSheet(app, code) {
 }
 
 function batchSheet(app) {
+  if (app.readOnly) { readOnlyToast(app.readOnly); return; }
   let mode = 'add';
   const picked = new Set();
   let series = SERIES[0];

@@ -1,6 +1,6 @@
 // Service Worker：把应用文件缓存到手机上，没网也能打开（云端大模型识别仍需联网）。
 // 每次发布新版本时把 VERSION 改一下（和 js/version.js 的 APP_VERSION 一致），手机打开 App 时会自动换成新版本。
-const VERSION = 'pindou-v2.8.1';
+const VERSION = 'pindou-v2.9.0';
 const SHELL = [
   './',
   './index.html',
@@ -77,6 +77,7 @@ self.addEventListener('fetch', e => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== location.origin) return; // API 请求不经过缓存
+  if (url.pathname.endsWith('/revoked.json')) return; // 停用名单：每次都去网站拿最新的（见 license.js）
   if (isModel(url)) {
     e.respondWith(caches.open(MODEL_CACHE).then(async cache => {
       const hit = await cache.match(req, { ignoreSearch: true });

@@ -33,7 +33,7 @@ export async function ipadSheet(app, p, items) {
   let frames;
   try { frames = toFrames(KIND.board, await packPayload(boardPayload(p, items))); } catch (e) { toast(e.message, 'error'); return; }
   const first = !sentToIpad(p);
-  if (first) await store.markSentToIpad(p.id);
+  if (first && !store.isReadOnly()) await store.markSentToIpad(p.id);
   const show = qrShow(frames);
   const release = await keepAwake();
   const url = ipadUrl();
@@ -50,7 +50,7 @@ export async function ipadSheet(app, p, items) {
           h('li', '点分享按钮 → “添加到主屏幕”'),
           h('li', '从主屏幕打开「拼豆看板」，点“扫码”')),
         h('button.btn.sm.soft', { onclick: async () => { await copyText(url); toast('网址已复制，可以用“隔空投送”或备忘录发到 iPad', 'ok'); } }, '复制网址')),
-      h('div.ipad-back',
+      store.isReadOnly() ? null : h('div.ipad-back',
         h('div.small', h('b', 'iPad 上打的勾带回 iPhone')),
         h('div.tiny.muted', '全部拼完了，直接点拼豆页面下面的“🎉 全拼好了”就行；中途想结算（先拼到这里），先把 iPad 的进度扫回来，才知道哪些颜色拼好了。'),
         h('button.btn.soft', { onclick: async () => { s.close(); await scanProgress(app, p, items); } }, '📷 扫 iPad 上的进度码'))),

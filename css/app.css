@@ -797,3 +797,23 @@ main.gate { max-width: 520px; }
 .own-out { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
 .own-list { margin-top: 10px; }
 .own-gen { margin-top: 4px; }
+
+/* ---------- 试用：只能查看、作者停用 ---------- */
+.ro-banner { display: flex; align-items: center; gap: 10px; background: var(--warn-soft); color: var(--warn); border-radius: 12px; padding: 8px 12px; margin: 4px 0 10px; cursor: pointer; flex-shrink: 0; }
+main.build-view > .ro-banner { border-radius: 0; margin: 0; }
+.ro-banner b { font-size: 14px; }
+.ro-ico { font-size: 18px; }
+.own-sec { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; }
+.own-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.own-row:last-child { border-bottom: 0; }
+.own-st { font-size: 12px; font-weight: 650; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.own-st.on { background: var(--ok-soft); color: var(--ok); }
+.own-st.off { background: var(--bad-soft); color: var(--bad); }
+.own-st.exp { background: var(--card-2); color: var(--muted); }
+.own-revdev { flex: 1; }
+.gh-block { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+.gh-block summary { font-size: 14px; font-weight: 650; cursor: pointer; }
+.gh-block ol { padding-left: 18px; margin: 8px 0; }
+.gh-status { margin: 8px 0 4px; }
+.gh-status.ok { color: var(--ok); } .gh-status.bad { color: var(--bad); }
+.tiny.bad { color: var(--bad); }

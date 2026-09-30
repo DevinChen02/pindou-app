@@ -193,8 +193,8 @@ async function gridStep(app, p, view) {
     view.append(gridPreview(st.pix?.canvas, st.board));
     view.append(h('p.small.muted.center', { style: { margin: '6px 0 0' } }, '红线每 5 格一条，看看是不是和格子对齐（点图放大看）'));
     view.append(h('div.card.su-sum',
-      h('div.row.between', h('span.small.muted', '图纸网格'), h('b', `${st.board.cols} 列 × ${st.board.rows} 行`)),
-      h('div.row.between', h('span.small.muted', '有豆子的范围'), h('b', `${b.w} 列 × ${b.h} 行`)),
+      h('div.row.between', h('span.small.muted', '图纸网格'), h('b', `${st.board.rows} 行 × ${st.board.cols} 列`)),
+      h('div.row.between', h('span.small.muted', '有豆子的范围'), h('b', `${b.h} 行 × ${b.w} 列`)),
       h('div.row.between', h('span.small.muted', '豆子'), h('b', `${fmtNum(beads)} 颗`, want ? h('span.small.muted', `（清单 ${fmtNum(want)}）`) : null))));
     if (want && Math.abs(beads - want) > Math.max(3, want * 0.03)) {
       view.append(h('div.banner.warn', h('span.ico', '⚠️'), h('div', h('b', '颗数和清单差得比较多'), h('div.small', '看看红线是不是正好框住了所有格子；不对的话“手动校准”。'))));
@@ -512,21 +512,21 @@ function gridPreview(src, board) {
   return h('div.su-prev-wrap', cv);
 }
 
-/** 手动校准：填列数行数，再在原图上点左上角、右下角 */
+/** 手动校准：填行数、列数，再在原图上点左上角、右下角 */
 function manualGrid(app, p) {
   const b = st.board;
   const colsIn = h('input.input.num', { type: 'number', inputmode: 'numeric', min: 2, value: b?.cols || '', placeholder: '列数' });
   const rowsIn = h('input.input.num', { type: 'number', inputmode: 'numeric', min: 2, value: b?.rows || '', placeholder: '行数' });
   const s = sheet([
-    h('p.small', '看图纸边上的编号，填网格一共有几列、几行（只算格子，不算写编号的边）。'),
-    h('div.row.gap', h('label.grow', h('div.small.muted', '横向（列）'), colsIn), h('span', '×'), h('label.grow', h('div.small.muted', '竖向（行）'), rowsIn)),
+    h('p.small', '看图纸边上的编号，填网格一共有几行、几列（只算格子，不算写编号的边）。'),
+    h('div.row.gap', h('label.grow', h('div.small.muted', '竖向（行）'), rowsIn), h('span', '×'), h('label.grow', h('div.small.muted', '横向（列）'), colsIn)),
     h('p.small.muted', { style: { marginTop: '10px' } }, '下一步会打开原图：先点网格左上角，再点右下角（可以双指放大点准一点）。'),
     h('div.row.gap.end', { style: { marginTop: '10px' } },
       h('button.btn.ghost', { onclick: () => s.close() }, '取消'),
       h('button.btn.primary', {
         onclick: () => {
           const cols = parseInt(colsIn.value, 10), rows = parseInt(rowsIn.value, 10);
-          if (!(cols >= 2 && rows >= 2 && cols <= 300 && rows <= 300)) { toast('请填列数和行数', 'error'); return; }
+          if (!(cols >= 2 && rows >= 2 && cols <= 300 && rows <= 300)) { toast('请填行数和列数', 'error'); return; }
           s.close();
           pickCorner(st.im, '点网格【左上角】那一格的左上角', c1 => {
             pickCorner(st.im, '再点网格【右下角】那一格的右下角', async c2 => {
@@ -566,7 +566,7 @@ async function pegStep(app, p, view) {
   const settings = app.settings;
   const presets = (settings.pegboards?.length ? settings.pegboards : DEFAULT_PEGBOARDS).map(([w, hh]) => [w, hh]);
   const choose = (W, H) => {
-    if (!fits(board, W, H)) { toast(`${W}×${H} 放不下这幅图`, 'error'); return; }
+    if (!fits(board, W, H)) { toast(`${H}×${W} 放不下这幅图`, 'error'); return; }
     const keepOffset = st.W === W && st.H === H && !st.native;
     const P = keepOffset ? clampPlace(board, { W, H, ox: st.ox, oy: st.oy }) : centredPlace(board, W, H);
     Object.assign(st, { W, H, ox: P.ox, oy: P.oy, native: false, step: 'place' });
@@ -574,21 +574,21 @@ async function pegStep(app, p, view) {
   };
   const savePresets = async list => { settings.pegboards = list; await store.saveSettings(settings); app.rerender(); };
   view.append(h('div.card.su-sum',
-    h('div.row.between', h('span.small.muted', '这幅图有豆子的范围'), h('b', `${b.w} 列 × ${b.h} 行`)),
+    h('div.row.between', h('span.small.muted', '这幅图有豆子的范围'), h('b', `${b.h} 行 × ${b.w} 列`)),
     h('div.tiny.muted', { style: { marginTop: '4px' } }, '拼豆板至少要这么大，放不下整幅图的尺寸不能选。')));
   view.append(h('div.section-title', '常用尺寸'));
   view.append(h('div.su-pegs', presets.map(([w, hh], i) => {
     const ok = fits(board, w, hh);
     return h('div.su-peg' + (ok ? '' : '.no') + (st.W === w && st.H === hh ? '.on' : ''),
       h('button.su-peg-main', { disabled: !ok, onclick: () => choose(w, hh) },
-        h('b', `${w} × ${hh}`), h('span.tiny', ok ? `四周空 ${w - b.w} 列 · ${hh - b.h} 行` : '放不下')),
-      h('button.su-peg-x', { 'aria-label': `从常用里删掉 ${w}×${hh}`, onclick: () => savePresets(presets.filter((_, j) => j !== i)) }, '✕'));
+        h('b', `${hh} × ${w}`), h('span.tiny', ok ? `四周空 ${hh - b.h} 行 · ${w - b.w} 列` : '放不下')),
+      h('button.su-peg-x', { 'aria-label': `从常用里删掉 ${hh}×${w}`, onclick: () => savePresets(presets.filter((_, j) => j !== i)) }, '✕'));
   }), !presets.length ? h('p.small.muted', '还没有常用尺寸，在下面输入一个。') : null));
-  const wIn = h('input.input.num', { type: 'number', inputmode: 'numeric', min: 1, placeholder: '宽（列）', value: st.W && !presets.some(([w, hh]) => w === st.W && hh === st.H) ? st.W : '' });
-  const hIn = h('input.input.num', { type: 'number', inputmode: 'numeric', min: 1, placeholder: '高（行）', value: st.W && !presets.some(([w, hh]) => w === st.W && hh === st.H) ? st.H : '' });
-  const read = () => { const w = parseInt(wIn.value, 10), hh = parseInt(hIn.value, 10); if (!(w > 0 && hh > 0 && w <= 400 && hh <= 400)) { toast('请填拼豆板的宽和高（格数）', 'error'); return null; } return [w, hh]; };
+  const wIn = h('input.input.num', { type: 'number', inputmode: 'numeric', min: 1, placeholder: '列（宽）', value: st.W && !presets.some(([w, hh]) => w === st.W && hh === st.H) ? st.W : '' });
+  const hIn = h('input.input.num', { type: 'number', inputmode: 'numeric', min: 1, placeholder: '行（高）', value: st.W && !presets.some(([w, hh]) => w === st.W && hh === st.H) ? st.H : '' });
+  const read = () => { const w = parseInt(wIn.value, 10), hh = parseInt(hIn.value, 10); if (!(w > 0 && hh > 0 && w <= 400 && hh <= 400)) { toast('请填拼豆板的行数和列数', 'error'); return null; } return [w, hh]; };
   view.append(h('div.section-title', '自定义尺寸'),
-    h('div.row.gap.su-custom', wIn, h('span', '×'), hIn),
+    h('div.row.gap.su-custom', hIn, h('span', '×'), wIn),
     h('div.row.gap', { style: { marginTop: '8px' } },
       h('button.btn.primary', { onclick: () => { const v = read(); if (v) choose(...v); } }, '用这个尺寸'),
       h('button.btn.soft', {
@@ -596,11 +596,11 @@ async function pegStep(app, p, view) {
           const v = read(); if (!v) return;
           if (presets.some(([w, hh]) => w === v[0] && hh === v[1])) { toast('常用里已经有这个尺寸了'); return; }
           savePresets([...presets, v].sort((a, c) => a[0] * a[1] - c[0] * c[1]));
-          toast(`已存为常用：${v[0]}×${v[1]}`, 'ok');
+          toast(`已存为常用：${v[1]}×${v[0]}`, 'ok');
         },
       }, '存为常用')),
     h('div.section-title', '或者'),
-    h('button.btn.ghost.block', { onclick: () => { Object.assign(st, { W: board.cols, H: board.rows, ox: 0, oy: 0, native: true, step: 'place' }); app.rerender(); } }, `按图纸原来的格子（${board.cols} × ${board.rows}）`));
+    h('button.btn.ghost.block', { onclick: () => { Object.assign(st, { W: board.cols, H: board.rows, ox: 0, oy: 0, native: true, step: 'place' }); app.rerender(); } }, `按图纸原来的格子（${board.rows} 行 × ${board.cols} 列）`));
 }
 
 // ---------- ⑤ 摆放：整体上下左右平移 ----------
@@ -646,7 +646,7 @@ function placeStep(app, p, view) {
     arrow('←', '左移', -1, 0), h('button.su-arrow.mid', { onclick: () => { const P = centredPlace(board, st.W, st.H); st.ox = P.ox; st.oy = P.oy; redraw(); } }, '居中'), arrow('→', '右移', 1, 0),
     h('span'), arrow('↓', '下移', 0, 1), h('span'));
   const panel = h('div.bd-tray.su-place',
-    h('div.row.between', h('b', `拼豆板 ${st.W} × ${st.H}`), h('button.link.small', { onclick: () => { st.step = 'peg'; app.rerender(); } }, '换尺寸')),
+    h('div.row.between', h('b', `拼豆板 ${st.H} × ${st.W}`), h('button.link.small', { onclick: () => { st.step = 'peg'; app.rerender(); } }, '换尺寸')),
     readout,
     h('div.row.gap.su-place-row', pad,
       h('div.grow.small.muted', '整幅图一起上下左右平移（按住连续移动），豆子不会超出拼豆板。浅色格子是拼豆板上空着的位置。')),
@@ -655,7 +655,7 @@ function placeStep(app, p, view) {
         const place = { W: st.W, H: st.H, ox: st.ox, oy: st.oy, mirror: P0.mirror, native: P0.native };
         await store.patchPattern(p.id, pp => ({ ...pp, board: { ...st.board, place }, boardError: null, boardSkip: false }));
         endSetup();
-        toast(`已摆到 ${st.W}×${st.H} 的拼豆板上`, 'ok');
+        toast(`已摆到 ${st.H}×${st.W} 的拼豆板上`, 'ok');
         app.rerender();
       },
     }, '完成，开始拼豆'));

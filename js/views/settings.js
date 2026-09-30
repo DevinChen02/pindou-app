@@ -1,5 +1,5 @@
 // “设置”标签：识别方法开关（开启前必须填好所需参数并通过自检）、库存参数、备份。
-import { h, clear, toast, confirmDialog, shareFile, copyText } from '../ui.js';
+import { h, clear, toast, confirmDialog, shareFile, copyText, fmtTime, sheet } from '../ui.js';
 import * as store from '../store.js';
 import { testConnection } from '../extract/vlm.js';
 import { testOcr, REC_MODELS, cellModelOf, downloadMB, getPP } from '../extract/ocr.js';
@@ -418,7 +418,8 @@ function aboutCard(app) {
 function licenseLine() {
   const el = h('p.small.muted.about-license', `设备码 ${license.deviceId()}`);
   license.status().then(st => {
-    const what = st.dev ? '本地测试，不用激活' : st.owner ? '作者（这台手机上有密钥），永久' : st.ok ? `试用激活：${license.expText(st.exp)}` : '还没激活';
+    const what = st.dev ? '本地测试，不用激活' : st.owner ? '作者（这台设备上有密钥），永久'
+      : st.ok ? `试用激活：${license.expText(st.exp)}` : st.revoked ? '已被停用 · 只能查看' : st.expired ? `试用已到期（${license.dayText(st.exp)}）· 只能查看` : '还没激活';
     el.textContent = `设备码 ${license.deviceId()} · ${what}`;
   }).catch(() => {});
   return el;
@@ -430,14 +431,49 @@ const DAYS = [['7', '7 天'], ['30', '30 天'], ['90', '90 天'], ['0', '永久'
 function ownerCard(app) {
   let days = '30';
   const dev = h('input.input.own-dev', { placeholder: '对方的设备码，如 K7Q4-M2XD', autocapitalize: 'characters', autocomplete: 'off', spellcheck: false });
-  const note = h('input.input.own-note', { placeholder: '备注（谁的，可不填）', autocomplete: 'off' });
+  const note = h('input.input.own-note', { placeholder: '备注（谁的、iPhone 还是 iPad，可不填）', autocomplete: 'off' });
   const out = h('div.own-out');
   const list = h('div.own-list');
+  let rev = { devices: [], codes: [] }, revSrc = '', pending = false;
   const drawList = () => {
-    const log = license.issued().slice(0, 8);
-    clear(list).append(...(log.length ? [h('div.tiny.muted', '最近生成的：'), ...log.map(x => h('div.tiny.muted', `${x.note ? x.note + ' · ' : ''}${x.dev} · ${license.expText(x.exp)}`))] : []));
+    const log = license.issued();
+    clear(list);
+    if (!log.length) return;
+    list.append(h('div.small', h('b', '发出去的激活码'), h('span.tiny.muted', revSrc === 'github' ? ' · 停用名单：GitHub 上的' : pending ? ' · 有改动还没推到网站上' : '')));
+    for (const x of log) {
+      const off = rev.devices.includes(x.dev) || (x.id && rev.codes.includes(x.id));
+      const expired = x.exp && x.exp < license.today();
+      const state = off ? h('span.own-st.off', '已停用') : expired ? h('span.own-st.exp', '已到期') : h('span.own-st.on', '正常');
+      // 停用：有激活码编号的只停这一个（以后可以再给这台设备发新的）；旧记录没有编号的停整台设备
+      const target = x.id ? { id: x.id } : { dev: x.dev };
+      list.append(h('div.own-row',
+        h('div.grow', h('div.small', x.note ? h('b', x.note + ' ') : null, h('span.mono', x.dev)), h('div.tiny.muted', `${license.expText(x.exp)} · ${fmtTime(x.at)} 发的`)),
+        state,
+        h('button.btn.sm' + (off ? '.soft' : '.ghost') + '.own-toggle', { type: 'button', 'data-dev': x.dev, onclick: () => setRev(off && rev.devices.includes(x.dev) ? { dev: x.dev } : target, !off, x.note || x.dev) }, off ? '恢复' : '停用')));
+    }
   };
-  drawList();
+  const loadRev = async () => {
+    try { const r = await license.ownerLoadList(); rev = r.list; revSrc = r.src; pending = !!r.pending; } catch { /* 没网：先按空的显示 */ }
+    drawList(); drawDevs();
+  };
+  // 不在上面列表里的设备（比如换了手机以前发的）：直接按设备码停用
+  const devIn = h('input.input.own-revdev', { placeholder: '设备码', autocapitalize: 'characters', autocomplete: 'off', spellcheck: false });
+  const devList = h('div.own-devs');
+  const drawDevs = () => {
+    const logged = new Set(license.issued().map(x => x.dev));
+    const extra = rev.devices.filter(d => !logged.has(d));
+    clear(devList).append(...extra.map(d => h('div.own-row', h('div.grow.small.mono', d), h('span.own-st.off', '已停用'), h('button.btn.sm.soft', { type: 'button', onclick: () => setRev({ dev: d }, false, d) }, '恢复'))));
+  };
+  const setRev = async (target, on, label) => {
+    if (on && !(await confirmDialog(`停用 ${label}？`, { ok: '停用', danger: true, detail: '对方下次联网打开 App（或从后台切回来）就只能查看，不能再扫新的图、不能修改；他的数据还在。随时可以恢复。' }))) return;
+    try {
+      const r = await license.ownerSetRevoked(target, on);
+      rev = r.list; pending = !r.pushed;
+      if (r.pushed) toast(on ? `已停用 ${label}：一两分钟后生效` : `已恢复 ${label}`, 'ok');
+      else manualPush(r.json);
+      drawList(); drawDevs();
+    } catch (e) { toast(e.message, 'error'); }
+  };
   const gen = h('button.btn.primary.own-gen', {
     type: 'button',
     onclick: async () => {
@@ -448,21 +484,68 @@ function ownerCard(app) {
           h('div.mono.own-code', r.code),
           h('div.row.gap-s', h('button.btn.sm.soft', { type: 'button', onclick: () => copyText(r.code) }, '复制激活码')),
           h('div.tiny.muted', '发给对方，在他 App 的激活页面粘贴。只能在那一台设备上用，转给别人没用。'));
+        if (rev.devices.includes(r.dev)) out.append(h('div.tiny.bad', '注意：这台设备整台被停用了，要先在下面“恢复”，新的激活码才能用。'));
         drawList();
       } catch (e) { toast(e.message, 'error'); }
     },
   }, '生成激活码');
+  const revDevBtn = h('button.btn.sm.ghost', { type: 'button', onclick: () => { const d = license.normalizeDevice(devIn.value); if (!d) { toast('设备码不对：应该是 8 位，比如 K7Q4-M2XD', 'error'); return; } setRev({ dev: d }, true, d); } }, '停用这台设备');
+  loadRev();
   return h('div.card',
-    h('p.small.muted', { style: { marginTop: 0 } }, '朋友第一次打开 App 会看到自己的“设备码”，让他发给你；在这里生成激活码发回去。'),
+    h('p.small.muted', { style: { marginTop: 0 } }, '朋友第一次打开 App 会看到自己的“设备码”，让他发给你；在这里生成激活码发回去。iPhone 和 iPad 看板各有自己的设备码，要分别生成。'),
     field('设备码', dev),
     field('能用多久', segEl(DAYS, days, v => { days = v; })),
     field('备注', note),
-    gen, out, list,
+    gen, out,
+    h('div.own-sec', list,
+      h('div.small', { style: { marginTop: '10px' } }, h('b', '停用某台设备'), h('span.tiny.muted', '（这台设备上的所有激活码都失效）')),
+      h('div.row.gap-s', { style: { marginTop: '6px' } }, devIn, revDevBtn), devList),
+    githubBlock(() => loadRev()),
     h('div.row.end', { style: { marginTop: '10px' } }, h('button.btn.sm.ghost', {
       type: 'button',
       onclick: async () => {
-        if (!(await confirmDialog('从这台手机上移除作者密钥？', { ok: '移除', danger: true, detail: '移除后这台手机不能再生成激活码（已经发出去的照样能用）。这台手机本身已经激活，不受影响。以后可以用“拼豆激活密钥.txt”在 关于 → “作者：导入密钥” 再导入。' }))) return;
+        if (!(await confirmDialog('从这台设备上移除作者密钥？', { ok: '移除', danger: true, detail: '移除后这台设备不能再生成激活码、停用激活码（已经发出去的照样能用）。这台设备本身已经激活，不受影响。以后可以用“拼豆激活密钥.txt”在 关于 → “作者：导入密钥” 再导入。' }))) return;
         license.removeOwnerKey(); toast('已移除'); app.rerender();
       },
     }, '移除密钥')));
+}
+
+/** 没连 GitHub 时：把新的 revoked.json 给作者，自己换掉、推送 */
+function manualPush(json) {
+  sheet([
+    h('p.small', h('b', '还差一步才生效：'), '把仓库里的 revoked.json 换成下面这段，推送到 GitHub（或者在 GitHub 网页上直接改）。'),
+    h('textarea.input.mono', { rows: 6, readonly: true, value: json }),
+    h('div.row.gap-s', { style: { marginTop: '8px' } },
+      h('button.btn.sm.soft', { type: 'button', onclick: () => copyText(json) }, '复制'),
+      h('a.btn.sm.ghost', { href: license.githubEditUrl(), target: '_blank', rel: 'noopener' }, '在 GitHub 网页上改')),
+    h('p.tiny.muted', '想点一下就生效：在下面“连接 GitHub”填一个只能改这个仓库的令牌。'),
+  ], { title: '停用名单' });
+}
+
+/** 连接 GitHub：填一个只能改这个仓库的令牌，点“停用”时 App 直接改网站上的 revoked.json */
+function githubBlock(onSaved) {
+  const conf = license.githubConf();
+  const tok = passwordInput(conf.token, 'github_pat_…');
+  const repo = h('input.input.own-repo', { value: conf.repo, placeholder: '用户名/仓库名', autocapitalize: 'off', autocomplete: 'off', spellcheck: false });
+  const st = h('div.small.gh-status', conf.token ? '已连接：点“停用”会直接改网站上的名单，一两分钟后生效' : '没连接：点“停用”后要自己把 revoked.json 换掉、推送');
+  const det = h('details.gh-block',
+    h('summary', '连接 GitHub（点一下就停用）'),
+    st,
+    h('ol.tiny.muted',
+      h('li', 'GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token'),
+      h('li', `Repository access 只选这个仓库（${conf.repo || '用户名/仓库名'}），Permissions → Contents 选 Read and write，有效期自己定`),
+      h('li', '把生成的令牌粘贴到这里。令牌只存在这台设备上')),
+    field('令牌', tok.el),
+    field('仓库', repo),
+    h('div.row.gap-s',
+      h('button.btn.sm.primary', {
+        type: 'button',
+        onclick: async () => {
+          license.setGithubConf({ token: tok.input.value, repo: repo.value });
+          st.textContent = '正在检查…';
+          try { await license.testGithub(); st.className = 'small gh-status ok'; st.textContent = '✓ 已连接：点“停用”会直接改网站上的名单'; onSaved?.(); } catch (e) { st.className = 'small gh-status bad'; st.textContent = e.message; }
+        },
+      }, '保存并检查'),
+      conf.token ? h('button.btn.sm.ghost', { type: 'button', onclick: () => { license.setGithubConf({ token: '', repo: repo.value }); tok.input.value = ''; st.className = 'small gh-status'; st.textContent = '已断开'; onSaved?.(); } }, '断开') : null));
+  return det;
 }

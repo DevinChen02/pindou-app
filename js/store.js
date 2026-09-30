@@ -2,6 +2,12 @@
 import * as db from './db.js';
 import { PALETTE, isCode, codeCompare, setPalette, paletteEntries, DEFAULT_ENTRIES, DEFAULT_HEX, CODE_RE } from './palette.js';
 
+// ---------- 只能查看（试用到期 / 被停用）：所有会改数据的操作都拦下来 ----------
+let readOnlyMsg = null;
+export function setReadOnly(msg) { readOnlyMsg = msg || null; }
+export const isReadOnly = () => !!readOnlyMsg;
+function guard() { if (readOnlyMsg) throw Object.assign(new Error(readOnlyMsg), { name: 'ReadOnly' }); }
+
 export const DEFAULT_MODELS = {
   anthropic: 'claude-sonnet-5',
   openai: 'gpt-5.5',
@@ -32,7 +38,7 @@ export const DEFAULT_SETTINGS = {
   buildShow: 'real',                // 选了颜色时板上：real（没拼的不画，像实物）| fade（三种深浅）
   buildSpot: false,                 // 高亮当前颜色（板子变暗，其他颜色变暗）
   dewatermark: true,                // 生成拼豆板时去水印（识别时不受水印影响）
-  pegboards: [[52, 52], [78, 78], [104, 104]], // 常用拼豆板尺寸（列 × 行）
+  pegboards: [[52, 52], [78, 78], [104, 104]], // 常用拼豆板尺寸，存的是 [列, 行]（界面上都先写行再写列）
   cellModel: 'v6s',                 // 读拼豆板格子上的色号用的识字模型：v6s（高精度，PP-OCRv6 small）| v5m（标准，PP-OCRv5 mobile）
 };
 
@@ -123,6 +129,7 @@ export function lowStockList(inv, settings, onlyOwned = false) {
  * 如果 forbidNegative 且有颜色会变成负数，整笔操作取消并抛错（err.shortages 列出缺口）。
  */
 export async function applyChanges(changesIn, { type, note = '', patternId = null, forbidNegative = false, clampZero = false, patternPatch = null, extra = {} } = {}) {
+  guard();
   const time = Date.now();
   // 同一色号出现多次时合并
   const byCode = new Map();
@@ -186,6 +193,7 @@ export async function applyChanges(changesIn, { type, note = '', patternId = nul
 
 /** 确认拼豆：按图纸扣库存。不够就整笔取消。 */
 export async function commitPattern(patternId, rows) {
+  guard();
   return applyChanges(rows.map(r => ({ code: r.code, delta: -r.need })), {
     type: 'consume', patternId, forbidNegative: true,
   });
@@ -193,6 +201,7 @@ export async function commitPattern(patternId, rows) {
 
 /** 撤销一笔流水（把它的变化反向加回去） */
 export async function undoTransaction(txId) {
+  guard();
   const tx = await db.get('transactions', txId);
   if (!tx) throw new Error('找不到这笔记录');
   if (tx.undone) throw new Error('这笔记录已经撤销过了');
@@ -208,6 +217,7 @@ export async function undoTransaction(txId) {
 }
 
 export async function setThreshold(code, threshold) {
+  guard();
   const rec = (await db.get('colors', code)) || { code, stock: 0 };
   await db.put('colors', { ...rec, threshold: threshold === '' || threshold == null ? null : Math.max(0, Math.round(threshold)), updatedAt: Date.now() });
 }
@@ -288,6 +298,7 @@ export function boardListDiff(p) {
 }
 
 export async function patchPattern(id, patch) {
+  guard();
   const p = await db.get('patterns', id);
   if (!p) throw new Error('图纸不存在了');
   const np = typeof patch === 'function' ? patch(p) : { ...p, ...patch };
@@ -305,10 +316,12 @@ export async function allTags() {
 }
 /** 新建一个分类（还没有图纸用它时也要记住） */
 export async function addTag(tag) {
+  guard();
   const cur = (await db.get('kv', 'tags'))?.value || [];
   if (!cur.includes(tag)) await db.put('kv', { key: 'tags', value: [...cur, tag] });
 }
 export async function renameTag(oldTag, newTag) {
+  guard();
   newTag = newTag.trim();
   if (!newTag || newTag === oldTag) return;
   for (const p of await db.getAll('patterns')) {
@@ -318,6 +331,7 @@ export async function renameTag(oldTag, newTag) {
   await db.put('kv', { key: 'tags', value: [...new Set(cur.map(t => (t === oldTag ? newTag : t)))] });
 }
 export async function deleteTag(tag) {
+  guard();
   for (const p of await db.getAll('patterns')) {
     if ((p.tags || []).includes(tag)) await db.put('patterns', { ...p, tags: p.tags.filter(t => t !== tag) });
   }
@@ -327,6 +341,7 @@ export async function deleteTag(tag) {
 
 /** 复制一份图纸（再拼一次）：颜色、原图、拼豆板、分类都带上，进度清空 */
 export async function duplicatePattern(id, name) {
+  guard();
   const p = await db.get('patterns', id);
   if (!p) throw new Error('图纸不存在了');
   const { id: _, txId, doneAt, build, ...rest } = p;
@@ -336,6 +351,7 @@ export async function duplicatePattern(id, name) {
 // ---------- 拼豆 ----------
 
 export async function startBuild(id) {
+  guard();
   return patchPattern(id, p => ({
     ...p, status: p.status === 'done' ? p.status : 'building',
     build: p.build || { startedAt: Date.now(), done: [], deducted: {}, txIds: [] },
@@ -343,6 +359,7 @@ export async function startBuild(id) {
 }
 
 export async function setColorDone(id, code, done) {
+  guard();
   return patchPattern(id, p => {
     const b = p.build || { startedAt: Date.now(), done: [], deducted: {}, txIds: [] };
     const set = new Set(b.done);
@@ -353,6 +370,7 @@ export async function setColorDone(id, code, done) {
 
 /** 发到 iPad 上拼了：记一下（拼的页面多一个“全拼好了”，iPad 上打的勾可以扫回来） */
 export async function markSentToIpad(id) {
+  guard();
   return patchPattern(id, p => {
     const b = p.build || { startedAt: Date.now(), done: [], deducted: {}, txIds: [] };
     return { ...p, status: p.status === 'done' ? p.status : 'building', build: { ...b, ipadAt: Date.now() } };
@@ -361,6 +379,7 @@ export async function markSentToIpad(id) {
 
 /** iPad 扫回来的进度：拼好了哪些颜色（整个换成 iPad 上的） */
 export async function setDoneColors(id, codes) {
+  guard();
   return patchPattern(id, p => {
     const b = p.build || { startedAt: Date.now(), done: [], deducted: {}, txIds: [] };
     return { ...p, status: p.status === 'done' ? p.status : 'building', build: { ...b, done: [...new Set(codes)], ipadAt: b.ipadAt || Date.now() } };
@@ -377,6 +396,7 @@ export function buildTouched(p) {
  * 这次拼豆扣过的库存全部加回来（每笔扣减记一笔“撤销”流水）。拼豆板和摆放位置保留。
  */
 export async function revertToPending(id) {
+  guard();
   const p = await db.get('patterns', id);
   if (!p) throw new Error('图纸不存在了');
   if (p.status !== 'building') throw new Error('只有“拼豆中”的图纸可以撤回');
@@ -392,6 +412,7 @@ export async function revertToPending(id) {
  * amounts: { 色号: 颗数 }；finish=true 表示这幅图结束了（全部拼好，或不拼了）
  */
 export async function settleBuild(id, amounts, { finish = false, partial = false, abandon = false, note = '' } = {}) {
+  guard();
   const changes = Object.entries(amounts).filter(([, n]) => n > 0).map(([code, n]) => ({ code, delta: -n }));
   const patch = (p, txId, time, txDeltas) => {
     const b = p.build || { startedAt: time, done: [], deducted: {}, txIds: [] };
@@ -414,17 +435,19 @@ export async function settleBuild(id, amounts, { finish = false, partial = false
 }
 
 export async function savePattern(p) {
+  guard();
   const rec = { createdAt: Date.now(), status: 'pending', ...p };
   const id = await db.put('patterns', rec);
   return id;
 }
 export async function getPattern(id) { return db.get('patterns', id); }
-export async function updatePattern(p) { return db.put('patterns', p); }
+export async function updatePattern(p) { guard(); return db.put('patterns', p); }
 export async function listPatterns() {
   const all = await db.getAll('patterns');
   return all.sort((a, b) => b.createdAt - a.createdAt);
 }
 export async function deletePattern(id) {
+  guard();
   const p = await db.get('patterns', id);
   await db.del('patterns', id);
   await deleteImagesIfUnused(p?.imageIds || []);
@@ -438,6 +461,7 @@ const freshImages = new Set();
 
 /** 保存一张原图，返回 id */
 export async function putImage({ dataUrl, w, h, name = '' }) {
+  guard();
   const id = `img${Date.now().toString(36)}${(imgSeq++).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   await db.put('images', { id, dataUrl, w, h, name, createdAt: Date.now() });
   freshImages.add(id);
@@ -522,6 +546,7 @@ export function paletteDiff() {
  * { oldCode?, code, hex, name? }
  */
 export async function upsertColor({ oldCode = null, code, hex, name = '' }) {
+  guard();
   code = String(code || '').trim().toUpperCase();
   hex = String(hex || '').trim().toUpperCase();
   if (!hex.startsWith('#')) hex = '#' + hex;
@@ -549,6 +574,7 @@ export async function upsertColor({ oldCode = null, code, hex, name = '' }) {
 
 /** 删除颜色；库存里有这个色号的记录会一起删除（记一条流水） */
 export async function deleteColor(code) {
+  guard();
   const rec = await db.get('colors', code);
   if (rec) {
     await db.del('colors', code);
@@ -568,6 +594,7 @@ export async function deleteColor(code) {
  * 返回 { added, updated, errors }
  */
 export async function importPaletteText(text) {
+  guard();
   const map = new Map(paletteEntries().map(e => [e.code, e]));
   let added = 0, updated = 0;
   const errors = [];
@@ -594,6 +621,7 @@ export function paletteText() {
 
 /** 恢复内置色卡。自定义新增的色号若有库存，不会删除库存记录（只是色卡里看不到） */
 export async function resetPalette() {
+  guard();
   await db.del('kv', 'palette');
   setPalette(DEFAULT_ENTRIES);
 }
@@ -621,6 +649,7 @@ export async function exportData({ includeSecrets = false, includeImages = false
 }
 
 export async function importData(data) {
+  guard();
   if (!data || data.app !== 'pindou-counter') throw new Error('这不是拼豆计数器的备份文件');
   const current = await getSettings();
   await db.clearAll();
@@ -641,6 +670,7 @@ export async function importData(data) {
 }
 
 export async function resetAll() {
+  guard();
   await db.clearAll();
   settingsCache = null;
   setPalette(DEFAULT_ENTRIES);

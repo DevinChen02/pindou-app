@@ -5,7 +5,7 @@ import { renderInventory } from './views/inventory.js';
 import { renderSettings } from './views/settings.js';
 import { clear, toast, h } from './ui.js';
 import { APP_VERSION } from './version.js';
-import { status as licenseStatus, renderGate } from './license.js';
+import { status as licenseStatus, renderGate, readOnlyBanner, readOnlyText, watchRevocation } from './license.js';
 window.__appVersion = APP_VERSION; // 测试用：当前运行的版本
 
 const views = {
@@ -26,6 +26,7 @@ export const app = {
   actions: document.getElementById('top-actions'),
   backBtn: document.getElementById('back-btn'),
   onLeave: null,
+  readOnly: null,         // 试用到期 / 被停用时是 license.status() 的结果：只能查看
 
   async render() {
     this.settings = await store.getSettings();
@@ -41,6 +42,9 @@ export const app = {
     const scrollKeep = this._keepScroll ? window.scrollY : 0;
     try {
       await views[this.tab](this);
+      // 试用到期 / 被停用：每一页最上面都有“只能查看”的横幅
+      this.view.querySelectorAll(':scope > .ro-banner').forEach(e => e.remove());
+      if (this.readOnly) this.view.prepend(readOnlyBanner(this.readOnly, relicense));
     } catch (e) {
       console.error(e);
       clear(this.view).append(Object.assign(document.createElement('div'), { className: 'banner bad', textContent: '出错了：' + e.message }));
@@ -92,10 +96,25 @@ document.getElementById('tabbar').addEventListener('click', e => {
   app.go(tab);
 });
 
+/** 试用状态：到期 / 被停用 → 只能查看（数据层也拦着，改不了） */
+function applyLicense(st) {
+  app.readOnly = st.readOnly ? st : null;
+  store.setReadOnly(st.readOnly ? readOnlyText(st) : null);
+}
+/** 输入了新的激活码（或者作者恢复了）：重新看一遍状态 */
+async function relicense() {
+  const st = await licenseStatus();
+  if (!st.ok && !st.readOnly) { location.reload(); return; }
+  applyLicense(st);
+  app.rerender();
+}
+let watching = false;
+
 async function start() {
-  // 试用激活：没激活（或到期）的设备只显示激活页面（见 license.js）
+  // 试用激活：没激活的设备只显示激活页面；到期 / 被停用的只能查看（见 license.js）
   const lic = await licenseStatus().catch(e => { console.warn(e); return { ok: true }; });
-  if (!lic.ok) { renderGate(lic, () => start()); return; }
+  if (!lic.ok && !lic.readOnly) { renderGate(lic, () => start()); return; }
+  applyLicense(lic);
   await store.loadPalette();
   try {
     if (navigator.storage?.persist) {
@@ -105,7 +124,7 @@ async function start() {
   } catch { /* 部分浏览器不支持 */ }
   try {
     const s = await store.loadSession();
-    if (s && ['verify', 'preview'].includes(s.step)) {
+    if (s && ['verify', 'preview'].includes(s.step) && !app.readOnly) {
       app.rec.session = s;
       app.rec.step = s.step;
       app.rec.method = s.method;
@@ -114,6 +133,11 @@ async function start() {
   } catch (e) { console.warn(e); }
   await app.render();
   store.gcImages(); // 清理没人用的图纸原图（不阻塞界面）
+  // 作者停用 / 恢复：打开和切回来时去网站拿停用名单（第一次显示完再开始，免得两次刷新页面叠在一起）
+  if (!watching && !lic.dev && !lic.insecure) {
+    watching = true;
+    watchRevocation(lic, st => { if (!st.ok && !st.readOnly) { location.reload(); return; } applyLicense(st); app.rerender(); });
+  }
 }
 
 // ---------- 更新到新版本 ----------
@@ -166,7 +190,8 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
 
 window.addEventListener('unhandledrejection', e => {
   console.error(e.reason);
-  if (e.reason?.name !== 'AbortError') toast('出错了：' + (e.reason?.message || e.reason), 'error');
+  if (e.reason?.name === 'ReadOnly') toast(e.reason.message, 'error'); // 只能查看：直接说原因
+  else if (e.reason?.name !== 'AbortError') toast('出错了：' + (e.reason?.message || e.reason), 'error');
 });
 
 start();

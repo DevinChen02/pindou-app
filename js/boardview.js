@@ -375,13 +375,13 @@ export function keepTrayScroll(colors, sel, scroll) {
 }
 
 /** 选中一个颜色时底部那一行：色号、颗数（和清单不一样时带上清单的数）、说明、“这个颜色拼好了” */
-export function selBar({ it, boardCount, isDone, hasBoard, show, spot, onToggle }) {
+export function selBar({ it, boardCount, isDone, hasBoard, show, spot, onToggle, readOnly = false }) {
   return h('div.bd-selbar',
     chip(it.code, { size: 'md' }),
     h('div.grow',
       h('b', `${it.code} · ${fmtNum(it.count)} 颗`, it.listCount != null && it.listCount !== it.count ? h('span.tiny.muted', `（清单 ${fmtNum(it.listCount)}）`) : null),
       hasBoard ? h('div.tiny.muted', (boardCount === it.count ? '' : `板上 ${boardCount} · `) + (spot ? `亮的 = 正在拼，暗的 = 已拼好，${show === 'real' ? '没拼的先不画' : '最暗 = 还没拼'}` : show === 'real' ? '浅色 = 已拼好，没拼的先不画' : '浅色 = 已拼好，最淡 = 还没拼')) : null),
-    h('button.btn' + (isDone ? '.ghost' : '.ok'), { onclick: onToggle }, isDone ? '↺ 还没拼好' : '✓ 这个颜色拼好了'));
+    readOnly ? (isDone ? h('span.small.muted', '✓ 已拼好') : null) : h('button.btn' + (isDone ? '.ghost' : '.ok'), { onclick: onToggle }, isDone ? '↺ 还没拼好' : '✓ 这个颜色拼好了'));
 }
 
 /** 拼豆板上每种颜色的格子数 */

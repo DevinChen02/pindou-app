@@ -13,6 +13,7 @@ import { orderItems, orderOf, showOf, spotOf, placeOf, viewSheet as viewOptions,
 import { goPattern, finishAndShow, revertPending } from './patterns.js';
 import { renderSetup, startSetup, setupActive } from './boardsetup.js';
 import { ipadSheet, sentToIpad, scanProgress } from './ipad-send.js';
+import { readOnlyText } from '../license.js';
 
 // 别的页面（准备拼豆板、测试）从这里拿画拼豆板的函数
 export { placeOf, guideStart, guideLines, boardSize, drawBoard, orderItems, BUILD_ORDERS, BUILD_SHOWS } from '../boardview.js';
@@ -92,7 +93,7 @@ export function reviewCount(board) {
 export async function renderBuild(app) {
   const p = await store.getPattern(app.pat.id);
   if (!p) { app.pat.page = 'list'; return app.render(); }
-  if (bs.pid !== p.id) Object.assign(bs, { pid: p.id, sel: null, edit: false, editCell: null, trayScroll: null, view: null, info: null });
+  if (bs.pid !== p.id) Object.assign(bs, { pid: p.id, sel: null, edit: false, editCell: null, trayScroll: null, view: null, info: null, roMirror: null });
   document.body.classList.add('mode-build');
   app.setTitle(p.name || '拼豆');
   app.setBack(() => { bs.edit = false; goPattern(app, p.id); });
@@ -100,7 +101,12 @@ export async function renderBuild(app) {
 
   const hasImg = p.images?.some(im => im.fullId);
   // 第一次进来（或者还没选拼豆板尺寸）：先准备拼豆板（框选 → 网格 → 颜色 → 尺寸 → 摆放）
-  if (hasImg && ((!p.board?.place && !p.boardSkip) || setupActive(p))) return renderSetup(app, p);
+  const ro = app.readOnly;
+  if (hasImg && ((!p.board?.place && !p.boardSkip) || setupActive(p))) {
+    if (!ro) return renderSetup(app, p);
+    view.append(h('div.card', h('p', h('b', '这张图纸还没有准备好拼豆板')), h('p.small.muted', readOnlyText(ro))));
+    return;
+  }
   // 选了“不用拼豆板”：只按颜色打勾（识别时顺手算出的拼豆板也不画）
   const board = p.board && !p.boardSkip ? { ...p.board, cells: unpackCells(p.board.cells) } : null;
   const items = buildItems(p, app.settings);
@@ -123,7 +129,7 @@ export async function renderBuild(app) {
     if (editing) editBar = h('div.bd-editbar', h('span', '✏️ 修正模式：点格子，在下面选颜色'), h('button.btn.sm', { onclick: () => { bs.edit = false; bs.editCell = null; app.rerender(); } }, '完成'));
     // （核对没把握的格子在“准备拼豆板 → 颜色”那一步做；拼的时候想再核对：⋯ → 核对拼豆板）
     const st = boardStage({
-      board, place: placeOf(board), sel: bs.sel, done, show, spot,
+      board, place: ro && bs.roMirror != null ? { ...placeOf(board), mirror: bs.roMirror } : placeOf(board), sel: bs.sel, done, show, spot,
       mark: editing && bs.editCell ? bs.editCell : null,
       onMirror: () => toggleMirror(app, p),
       onSpot: () => toggleSpot(app),
@@ -170,7 +176,7 @@ export async function renderBuild(app) {
     const it = items.find(i => i.code === bs.sel);
     const isDone = done.has(it.code);
     tray.append(selBar({
-      it, boardCount: boardCount.get(it.code) || 0, isDone, hasBoard: !!board, show, spot,
+      it, boardCount: boardCount.get(it.code) || 0, isDone, hasBoard: !!board, show, spot, readOnly: !!ro,
       onToggle: async () => {
         await store.setColorDone(p.id, it.code, !isDone);
         if (!isDone) {
@@ -186,7 +192,8 @@ export async function renderBuild(app) {
   const onIpad = !!board && sentToIpad(p);
   tray.append(h('div.bd-foot',
     h('div.grow.small', h('b', `已拼好 ${nDone}/${items.length} 色`), h('div.progress', h('i', { style: { width: (nDone / items.length * 100) + '%' } }))),
-    allDone
+    ro ? h('span.small.muted', '🔒 只能查看')
+    : allDone
       ? h('button.btn.primary', { onclick: () => finishAll(app, p) }, '🎉 全图已拼好')
       : onIpad
         ? h('div.row.gap-s', h('button.btn.soft', { onclick: () => endSheet(app, p) }, '先拼到这里…'), h('button.btn.primary.bd-alldone', { onclick: () => finishAll(app, p) }, '🎉 全拼好了'))
@@ -196,6 +203,7 @@ export async function renderBuild(app) {
 }
 
 async function toggleMirror(app, p) {
+  if (app.readOnly) { bs.roMirror = !(bs.roMirror ?? !!p.board.place?.mirror); app.rerender(); return; }
   const on = !p.board.place?.mirror;
   await store.patchPattern(p.id, pp => ({ ...pp, board: { ...pp.board, place: { ...placeOf(pp.board), mirror: on } } }));
   toast(on ? '已镜像：拼豆板左右翻转显示' : '已取消镜像', 'ok');
@@ -262,6 +270,17 @@ async function setCell(app, p, board, i, code, where) {
 function menu(app, p) {
   const hasImg = p.images?.some(im => im.fullId);
   const hasBoard = !!(p.board && !p.boardSkip); // 选了“不用拼豆板”时没有拼豆板的那些功能
+  if (app.readOnly) {
+    // 只能查看：看原图、发到 iPad 看、对一对、镜像、显示方式
+    const r = sheet(h('div.menu',
+      hasImg ? h('button', { onclick: () => { r.close(); openImageViewer(entriesFromImages(p.images), { view: 'full', focus: false }); } }, '🖼 看原图') : null,
+      hasBoard ? h('button', { onclick: () => { r.close(); ipadSheet(app, p, buildItems(p, app.settings)); } }, '📲 在 iPad 上看（扫码）') : null,
+      hasBoard ? h('button', { onclick: () => { r.close(); compareSheet(p); } }, '📊 拼豆板和清单对一对') : null,
+      hasBoard ? h('button', { onclick: () => { r.close(); toggleMirror(app, p); } }, '⇋ 镜像（左右翻转）') : null,
+      h('button', { onclick: () => { r.close(); viewSheet(app); } }, '🎨 拼的顺序和显示方式'),
+      h('p.small.muted', { style: { padding: '8px 4px 0' } }, readOnlyText(app.readOnly))), { title: '拼豆' });
+    return;
+  }
   const s = sheet(h('div.menu',
     hasImg ? h('button', { onclick: () => { s.close(); openImageViewer(entriesFromImages(p.images), { view: 'full', focus: false }); } }, '🖼 看原图') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); ipadSheet(app, p, buildItems(p, app.settings)); } }, '📲 在 iPad 上拼（扫码）') : null,
@@ -292,7 +311,7 @@ function compareSheet(p) {
   const rows = merged(p).map(it => ({ ...it, got: cnt.get(it.code) || 0 }));
   const bad = rows.filter(r => r.got !== r.count);
   sheet([
-    h('p.small', `拼豆板 ${board.cols} 列 × ${board.rows} 行，${bad.length ? `${bad.length} 种颜色的格子数和清单不一样：` : '每种颜色的格子数都和清单一致 ✓'}`),
+    h('p.small', `拼豆板 ${board.rows} 行 × ${board.cols} 列，${bad.length ? `${bad.length} 种颜色的格子数和清单不一样：` : '每种颜色的格子数都和清单一致 ✓'}`),
     h('div.table-wrap', h('table.ptable',
       h('thead', h('tr', h('th', '颜色'), h('th', '清单'), h('th', '拼豆板'))),
       h('tbody', rows.map(r => h('tr' + (r.got !== r.count ? '.low' : ''), h('td', chip(r.code, { size: 'sm' })), h('td', fmtNum(r.count)), h('td', fmtNum(r.got))))))),

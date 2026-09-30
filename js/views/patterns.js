@@ -1,6 +1,7 @@
 // “图纸”标签：图纸库（搜索 / 按状态和分类筛选 / 多选算合计、多选删除）→ 图纸详情 → 开始拼豆。
 import { h, clear, toast, sheet, confirmDialog, chip, fmtNum, fmtTime, copyText, inputSheet } from '../ui.js';
 import * as store from '../store.js';
+import { readOnlyToast } from '../license.js';
 import { newId } from '../extract/index.js';
 import { openImageViewer, entriesFromImages } from '../viewer.js';
 import { renderRecognize } from './recognize.js';
@@ -199,6 +200,8 @@ function card(app, p, sel) {
 }
 
 function startAdd(app) {
+  // 试用到期 / 被停用：不能再扫新的图
+  if (app.readOnly) { readOnlyToast(app.readOnly); return; }
   app.pat.page = 'add';
   if (!app.rec.session) app.rec.step = 'pick';
   app.render();
@@ -253,10 +256,16 @@ async function renderDetail(app) {
       h('b', '上次拼到一半没继续'),
       h('div.small', `${fmtTime(lastH.endedAt)} 结束${ded.length ? `，当时已从库存扣掉：${ded.map(([c, n]) => `${c}×${n}`).join('、')}` : '，没有扣库存'}。这张图纸已放回“待拼”，再拼是全新的一次。`))));
   }
-  view.append(h('div.pd-cta',
-    p.status === 'done'
-      ? h('button.btn.primary.big.block', { onclick: () => again(app, p) }, '🔁 再拼一次')
-      : h('button.btn.primary.big.block', { onclick: () => startBuild(app, p) }, p.status === 'building' ? `🧩 继续拼豆（${nDone}/${p.items.length} 色）` : '🧩 开始拼豆')));
+  // 只能查看：有拼豆板就能打开看，别的不行
+  const canView = p.board?.place && !p.boardSkip;
+  if (app.readOnly) {
+    if (canView) view.append(h('div.pd-cta', h('button.btn.primary.big.block', { onclick: () => goPattern(app, p.id, 'build') }, '🧩 查看拼豆板')));
+  } else {
+    view.append(h('div.pd-cta',
+      p.status === 'done'
+        ? h('button.btn.primary.big.block', { onclick: () => again(app, p) }, '🔁 再拼一次')
+        : h('button.btn.primary.big.block', { onclick: () => startBuild(app, p) }, p.status === 'building' ? `🧩 继续拼豆（${nDone}/${p.items.length} 色）` : '🧩 开始拼豆')));
+  }
 
   // 库存对照（还要扣的部分）
   if (p.status !== 'done') {
