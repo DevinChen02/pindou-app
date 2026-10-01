@@ -9,14 +9,14 @@ import { boardReview, verifyIdentities, identityRisks } from '../cells.js';
 import { ocrOpt } from '../ocrcells.js';
 import { openImageViewer, entriesFromImages } from '../viewer.js';
 import { makeCanvas, contentBounds, guessLegendRect } from '../image.js';
-import { orderItems, orderOf, showOf, spotOf, placeOf, viewSheet as viewOptions, boardStage, colorStrip, keepTrayScroll, selBar, cellCounts } from '../boardview.js';
+import { orderItems, orderOf, showOf, spotOf, placeOf, viewSheet as viewOptions, boardStage, colorStrip, keepTrayScroll, selBar, cellCounts, cellWhere } from '../boardview.js';
 import { goPattern, finishAndShow, revertPending } from './patterns.js';
 import { renderSetup, startSetup, setupActive } from './boardsetup.js';
 import { ipadSheet, sentToIpad, scanProgress } from './ipad-send.js';
 import { readOnlyText } from '../license.js';
 
 // 别的页面（准备拼豆板、测试）从这里拿画拼豆板的函数
-export { placeOf, guideStart, guideLines, boardSize, drawBoard, orderItems, BUILD_ORDERS, BUILD_SHOWS } from '../boardview.js';
+export { placeOf, guideStart, guideLines, blocks, cellWhere, boardSize, drawBoard, orderItems, BUILD_ORDERS, BUILD_SHOWS } from '../boardview.js';
 
 const bs = { pid: null, sel: null, edit: false, busy: false };
 
@@ -231,7 +231,7 @@ function editPanel(app, p, board) {
   const i = ec.r * board.cols + ec.c;
   const cur = board.cells[i];
   const curCode = cur ? board.codes[cur - 1] : null;
-  const where = `第 ${ec.py + 1} 行 · 第 ${ec.px + 1} 列`;
+  const where = cellWhere(ec.px, ec.py, placeOf(board));
   const crop = h('div.bd-edit-crop');
   cellCropOf(p, board, i).then(cv => { if (cv) crop.append(cv); else crop.remove(); }).catch(() => crop.remove());
   const codes = merged(p).map(it => it.code);
