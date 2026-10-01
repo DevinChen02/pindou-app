@@ -63,26 +63,21 @@ export function guideLines(n, native = false) {
   return out;
 }
 /**
- * 5×5 大格：辅助线（和外框）围出来的完整 5 颗宽的格子，四周留空的那几排不算。
- * 返回在屏幕上从左到右（行：从上到下）的每个大格 [{ k: 第几个（从 1 起）, a, b: 起止格线序号 }]。
- * 52×52 → 10 个（第 2–51 颗）、78×78 → 14 个（第 5–74 颗）、104×104 → 20 个（第 3–102 颗）；
- * “按图纸原来的格子”从边上数，最后不满 5 颗的不算。镜像时线翻过来，还是从屏幕左边数。
+ * 编号：中间的每一颗都编号（第一个完整 5×5 大格的第一颗记作 1），四周留空的那几排不编号。
+ * 52×52 两边各留 1 颗 → 中间第 2–51 颗编 1–50；78×78 留 4 → 第 5–74 颗编 1–70；104×104 留 2 → 第 3–102 颗编 1–100。
+ * 其他尺寸一样两边留得一样多；“按图纸原来的格子”不留边，1 到 n 全编（和图纸上的编号一样）。
+ * i：从屏幕左边（行：上边）数的第几颗（从 0 起）；不编号返回 0。镜像时两边留得一样多，还是从屏幕左边数。
  */
-export function blocks(n, native = false, mirror = false) {
-  const lines = [...new Set([0, n, ...guideLines(n, native)].map(c => (mirror ? n - c : c)))].sort((a, b) => a - b);
-  const out = [];
-  for (let i = 0; i + 1 < lines.length; i++) if (lines[i + 1] - lines[i] === 5) out.push({ k: out.length + 1, a: lines[i], b: lines[i + 1] });
-  return out;
+export function cellNum(i, n, native = false) {
+  const m = guideStart(n, native);
+  return i >= m && i < n - m ? i - m + 1 : 0;
 }
 
-/** 拼豆板上 (px, py) 这一颗在哪：“第 3 行大格第 2 排 · 第 5 列大格第 4 颗”；留空那一圈里：“上边留空的第 1 排” */
+/** 拼豆板上 (px, py) 这一颗在哪：“第 13 行 · 第 27 列”（和边上的编号一样）；留空那一圈里：“上边留空的第 1 行” */
 export function cellWhere(px, py, P) {
-  const by = blocks(P.H, P.native).find(b => py >= b.a && py < b.b);
-  const bx = blocks(P.W, P.native, P.mirror).find(b => px >= b.a && px < b.b);
-  const row = by ? `第 ${by.k} 行大格第 ${py - by.a + 1} 排`
-    : py < P.H / 2 ? `上边留空的第 ${py + 1} 排` : `下边留空的倒数第 ${P.H - py} 排`;
-  const col = bx ? `第 ${bx.k} 列大格第 ${px - bx.a + 1} 颗`
-    : px < P.W / 2 ? `左边留空的第 ${px + 1} 颗` : `右边留空的倒数第 ${P.W - px} 颗`;
+  const r = cellNum(py, P.H, P.native), c = cellNum(px, P.W, P.native);
+  const row = r ? `第 ${r} 行` : py < P.H / 2 ? `上边留空的第 ${py + 1} 行` : `下边留空的倒数第 ${P.H - py} 行`;
+  const col = c ? `第 ${c} 列` : px < P.W / 2 ? `左边留空的第 ${px + 1} 列` : `右边留空的倒数第 ${P.W - px} 列`;
   return `${row} · ${col}`;
 }
 
@@ -179,11 +174,17 @@ export function drawBoard(g, q, board, { sel, done, place = null, show = 'real',
   for (const c of vx) { g.moveTo(M + c * CELL, M); g.lineTo(M + c * CELL, M + rows * CELL); }
   for (const r of [0, rows, ...guideLines(rows, P.native)]) { g.moveTo(M, M + r * CELL); g.lineTo(M + cols * CELL, M + r * CELL); }
   g.stroke();
-  // 编号：只给中间完整的 5×5 大格编号（写在大格正中间：上边是第几列大格、左边是第几行大格），四周留空的那几排不写
-  g.fillStyle = '#5f646b'; g.font = `700 10px -apple-system, "PingFang SC", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-  for (const b of blocks(cols, P.native, P.mirror)) g.fillText(String(b.k), M + (b.a + 2.5) * CELL, M / 2);
+  // 编号：中间每一颗都编号（见 cellNum），四周留空的那几排不编号；逢 5 的数字深一点
+  g.textBaseline = 'middle';
+  const num = (n, x, y) => {
+    g.font = `${n % 5 === 0 ? 700 : 500} ${n >= 100 ? 7.5 : 9}px -apple-system, "PingFang SC", sans-serif`;
+    g.fillStyle = n % 5 === 0 ? '#4a4e55' : '#9a9ea5';
+    g.fillText(String(n), x, y);
+  };
+  g.textAlign = 'center';
+  for (let c = 0; c < cols; c++) { const n = cellNum(c, cols, P.native); if (n) num(n, M + (c + 0.5) * CELL, M / 2); }
   g.textAlign = 'right';
-  for (const b of blocks(rows, P.native)) g.fillText(String(b.k), M - 4, M + (b.a + 2.5) * CELL);
+  for (let r = 0; r < rows; r++) { const n = cellNum(r, rows, P.native); if (n) num(n, M - 3, M + (r + 0.5) * CELL); }
 }
 
 // ---------- 固定在边上的行号、列号 ----------
@@ -209,45 +210,47 @@ export function makeRulers(stage, P) {
     g.fillStyle = 'rgba(247,246,243,.95)'; g.fillRect(0, 0, w, hh);
     return g;
   };
-  // 和画布上一样只标 5×5 大格：数字在大格中间；大格只露出一段时数字挪到露出来的那段里（不会看不到）；大格之间画一道分隔
-  const bx = blocks(P.W, P.native, P.mirror), by = blocks(P.H, P.native);
+  // 和画布上一样：中间的每一颗编号，四周留空的不编（见 cellNum）；格子在屏幕上多大决定隔几颗标一个数（数字至少要 ~16 像素宽）
+  const stepFor = px => (px >= 16 ? 1 : px * 5 >= 18 ? 5 : 10);
+  const shown = (n, step) => n && (step === 1 || n % step === 0 || (n === 1 && step === 5));
+  // 每 5 颗的辅助线（和外框）在尺子上画一道短线，方便对位置
+  const vlines = [0, P.W, ...guideLines(P.W, P.native).map(c => (P.mirror ? P.W - c : c))], hlines = [0, P.H, ...guideLines(P.H, P.native)];
   function draw(st) {
-    const sw = stage.clientWidth, sh = stage.clientHeight, bs = 5 * CELL * st.s;
-    // 画布自带的数字（上边中线 M/2、左边右对齐到 M-4）移出屏幕了才盖尺子，不挡住没放大时的豆子
+    const sw = stage.clientWidth, sh = stage.clientHeight, cs = CELL * st.s;
+    // 画布自带的数字（上边中线 M/2、左边右对齐到 M-3）移出屏幕了才盖尺子，不挡住没放大时的豆子
     const showTop = st.ty + (M / 2) * st.s < 4;
     const showLeft = st.tx + (M - 10) * st.s < 2;
-    const x0 = showLeft ? LW : 0, y0 = showTop ? TH : 0;
-    const every = bs >= 18 ? 1 : 2; // 大格太小（缩得很小）时隔一个标一个
-    // 一个大格在尺子上：[a, b] 是屏幕上的起止，[lo, hi] 是尺子能用的范围 → 数字放哪（放不下返回 null）
-    const spot = (a, b, lo, hi, pad) => {
-      const va = Math.max(a, lo), vb = Math.min(b, hi);
-      if (vb - va < 2 * pad) return null;
-      return Math.min(vb - pad, Math.max(va + pad, (a + b) / 2));
-    };
+    const x0 = showLeft ? LW : 0, y0 = showTop ? TH : 0, x1 = sw, step = stepFor(cs);
     if (showTop) {
       const g = prep(top, sw, TH);
       g.strokeStyle = 'rgba(0,0,0,.14)'; g.lineWidth = 1;
       g.beginPath(); g.moveTo(0, TH - 0.5); g.lineTo(sw, TH - 0.5);
-      for (const b of bx) for (const e of [b.a, b.b]) { const x = Math.round(st.tx + (M + e * CELL) * st.s) + 0.5; if (x > x0 && x < sw) { g.moveTo(x, 4); g.lineTo(x, TH); } }
+      for (const c of vlines) { const x = Math.round(st.tx + (M + c * CELL) * st.s) + 0.5; if (x > x0 && x < sw) { g.moveTo(x, TH - 6); g.lineTo(x, TH); } }
       g.stroke();
-      g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = font(700); g.fillStyle = '#3a3d42';
-      for (const b of bx) {
-        if (b.k % every) continue;
-        const x = spot(st.tx + (M + b.a * CELL) * st.s, st.tx + (M + b.b * CELL) * st.s, x0, sw, 9);
-        if (x != null) g.fillText(String(b.k), x, TH / 2 + 1);
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      for (let c = 0; c < P.W; c++) {
+        const n = cellNum(c, P.W, P.native);
+        if (!shown(n, step)) continue;
+        const x = st.tx + (M + (c + 0.5) * CELL) * st.s;
+        if (x < x0 + 6 || x > x1 - 6) continue;
+        g.font = font(n % 5 === 0 ? 700 : 500); g.fillStyle = n % 5 === 0 ? '#3a3d42' : '#80848a';
+        g.fillText(String(n), x, TH / 2);
       }
     } else top.style.display = 'none';
     if (showLeft) {
       const g = prep(left, LW, sh);
       g.strokeStyle = 'rgba(0,0,0,.14)'; g.lineWidth = 1;
       g.beginPath(); g.moveTo(LW - 0.5, 0); g.lineTo(LW - 0.5, sh);
-      for (const b of by) for (const e of [b.a, b.b]) { const y = Math.round(st.ty + (M + e * CELL) * st.s) + 0.5; if (y > y0 && y < sh) { g.moveTo(6, y); g.lineTo(LW, y); } }
+      for (const r of hlines) { const y = Math.round(st.ty + (M + r * CELL) * st.s) + 0.5; if (y > y0 && y < sh) { g.moveTo(LW - 6, y); g.lineTo(LW, y); } }
       g.stroke();
-      g.textAlign = 'right'; g.textBaseline = 'middle'; g.font = font(700); g.fillStyle = '#3a3d42';
-      for (const b of by) {
-        if (b.k % every) continue;
-        const y = spot(st.ty + (M + b.a * CELL) * st.s, st.ty + (M + b.b * CELL) * st.s, y0, sh, 7);
-        if (y != null) g.fillText(String(b.k), LW - 5, y);
+      g.textAlign = 'right'; g.textBaseline = 'middle';
+      for (let r = 0; r < P.H; r++) {
+        const n = cellNum(r, P.H, P.native);
+        if (!shown(n, step)) continue;
+        const y = st.ty + (M + (r + 0.5) * CELL) * st.s;
+        if (y < y0 + 5 || y > sh - 5) continue;
+        g.font = font(n % 5 === 0 ? 700 : 500); g.fillStyle = n % 5 === 0 ? '#3a3d42' : '#80848a';
+        g.fillText(String(n), LW - 7, y);
       }
       if (showTop) { g.fillStyle = 'rgba(247,246,243,1)'; g.fillRect(0, 0, LW, TH); } // 左上角的空角
     } else left.style.display = 'none';

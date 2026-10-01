@@ -16,7 +16,7 @@ import { ipadSheet, sentToIpad, scanProgress } from './ipad-send.js';
 import { readOnlyText } from '../license.js';
 
 // 别的页面（准备拼豆板、测试）从这里拿画拼豆板的函数
-export { placeOf, guideStart, guideLines, blocks, cellWhere, boardSize, drawBoard, orderItems, BUILD_ORDERS, BUILD_SHOWS } from '../boardview.js';
+export { placeOf, guideStart, guideLines, cellNum, cellWhere, boardSize, drawBoard, orderItems, BUILD_ORDERS, BUILD_SHOWS } from '../boardview.js';
 
 const bs = { pid: null, sel: null, edit: false, busy: false };
 
