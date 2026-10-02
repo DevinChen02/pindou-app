@@ -64,30 +64,54 @@ export function contentBounds(canvas) {
 
 /**
  * 猜色号清单的位置：图纸格子由横贯全图的格线组成，清单一般在最后一条长横线下面。
+ * “横线”也包括图纸下边写行列号的那一条灰底横条（≤ 22 像素高），清单常常就在它下面。
  * 找不到时返回内容区下方 30%。imgData 为 content 区域的 ImageData。
  */
 export function guessLegendRectFromData(img, content) {
   const { data, width: w, height: h } = img;
   const lum = (x, y) => { const p = (y * w + x) * 4; return 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2]; };
   const step = Math.max(1, Math.floor(w / 400));
-  let lastLine = -1;
+  let lastLine = -1, lastBand = -1;
   const n = Math.floor(w / step);
+  // 每一列（采样点）上一次“变暗”“变亮”的边在哪一行：横条的上边和下边
+  const lastDown = new Int32Array(n + 1).fill(-99), lastUp = new Int32Array(n + 1).fill(-99);
   for (let y = 2; y < h - 2; y++) {
     // 最长的连续“横线”段（允许 2 个采样点的小断口）；清单里一个个小方框的边不够长
-    let run = 0, best = 0, gap = 0;
-    for (let x = 0; x < w; x += step) {
+    let run = 0, best = 0, gap = 0, brun = 0, bbest = 0, bgap = 0;
+    for (let x = 0, k = 0; x < w; x += step, k++) {
       const a = lum(x, y), up = lum(x, y - 2), dn = lum(x, y + 2);
       if ((a - up > 18 && a - dn > 18) || (up - a > 18 && dn - a > 18)) { run += 1 + gap; gap = 0; if (run > best) best = run; }
       else if (run && gap < 2) gap++;
       else { run = 0; gap = 0; }
+      // 横条的下边：这里变亮（或变暗），3–22 行以前有反方向的边
+      const d = dn - a;
+      const band = (d > 18 && y - lastDown[k] >= 3 && y - lastDown[k] <= 22) || (d < -18 && y - lastUp[k] >= 3 && y - lastUp[k] <= 22);
+      if (band) { brun += 1 + bgap; bgap = 0; if (brun > bbest) bbest = brun; }
+      else if (brun && bgap < 2) bgap++;
+      else { brun = 0; bgap = 0; }
+      if (d < -18) lastDown[k] = y;
+      if (d > 18) lastUp[k] = y;
     }
     if (best / n > 0.6) lastLine = y;
+    if (bbest / n > 0.6) lastBand = y + 1;
   }
   const fallback = { x: content.x, y: content.y + content.h * 0.7, w: content.w, h: content.h * 0.3 };
-  if (lastLine < 0) return fallback;
-  const top = lastLine + 3;
+  const last = Math.max(lastLine, lastBand);
+  if (last < 0) return fallback;
+  const top = last + 3;
   const rest = h - top;
-  if (rest < h * 0.03 || rest > h * 0.6) return fallback;
+  // 横条下面只剩窄窄一条（清单只有一行、贴着图底）：里面有彩色的色块就用它
+  let minRest = h * 0.03;
+  if (last === lastBand && rest < minRest) {
+    let colored = 0, total = 0;
+    for (let y = top; y < h; y += 2) for (let x = 0; x < w; x += step) {
+      const p = (y * w + x) * 4;
+      total++;
+      if (Math.max(data[p], data[p + 1], data[p + 2]) - Math.min(data[p], data[p + 1], data[p + 2]) > 60) colored++;
+    }
+    if (total && colored >= total * 0.02) minRest = Math.max(14, h * 0.008);
+  }
+  if (rest < minRest || rest > h * 0.6) return fallback;
   return { x: content.x, y: content.y + top, w: content.w, h: rest };
 }
 

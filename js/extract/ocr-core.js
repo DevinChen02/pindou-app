@@ -5,8 +5,9 @@
 // 所以这里先自己把“字”找出来：
 //   1. 按“同色连片”分割：大片同色区域（页面底色、色块、表格格子）是背景，其余是字
 //   2. 连通域 → 估计字高 → 去掉色块边框、表格线等大块
-//   3. 把相邻字符拼成“词”（一个色号或一个数量）
-//   4. 每个词单独裁出、按字高放大成白底黑字，再交给 Tesseract 逐词识别
+//   3. 把相邻字符拼成“词”（一个色号或一个数量）；底色不一样的（色块上的色号、白底上的数量）挨得再近也不拼
+//   4. 每个词单独交给 PP-OCR（或裁出、按字高放大成白底黑字交给 Tesseract）逐词识别
+//   字很小（< 12 像素）时再放大两倍分一次词、读一遍，取读得好的那次（readLegend）
 
 export function toLum(img) {
   const { data, width, height } = img;
@@ -120,6 +121,8 @@ export function estimateCharHeight(comps, imgH) {
 /** 把字符连通域拼成词；n = 估计的字符数（粘连的字按宽度估） */
 export function groupWords(comps, hc) {
   const glyphs = c => (c.w <= hc * 0.95 ? 1 : Math.max(1, Math.round(c.w / (hc * 0.62))));
+  // 比字高一截的直的细竖线：色块、格子的边（“1”和字一样高，括号是弯的）；它自己单独算一个词，不和两边的字拼在一起
+  const isSep = c => c.h > hc * 1.4 && c.w < c.h * 0.25 && c.area >= c.w * c.h * 0.7;
   const chars = comps.filter(c =>
     c.h >= hc * 0.35 && c.h <= hc * 1.6 && c.w <= hc * 5 && c.area >= hc * hc * 0.03);
   chars.sort((a, b) => (a.y0 + a.y1) / 2 - (b.y0 + b.y1) / 2);
@@ -136,14 +139,16 @@ export function groupWords(comps, hc) {
     line.items.sort((a, b) => a.x0 - b.x0);
     let cur = null;
     for (const c of line.items) {
-      if (cur && c.x0 - cur.x1 <= hc * 0.55) {
+      // 挨得近、底色也一样才是同一个词：色号写在色块上、数量写在白底上，两个挨得再近也分开
+      if (cur && c.x0 - cur.x1 <= hc * 0.55 && !bgApart(cur.bgR, c.bg) && !cur.sep && !isSep(c)) {
         cur.x0 = Math.min(cur.x0, c.x0); cur.x1 = Math.max(cur.x1, c.x1);
         cur.y0 = Math.min(cur.y0, c.y0); cur.y1 = Math.max(cur.y1, c.y1);
         cur.n += glyphs(c);
         cur.parts.push({ x0: c.x0, x1: c.x1 });
+        if (c.bg) cur.bgR = c.bg;
       } else {
         if (cur) words.push(cur);
-        cur = { x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1, n: glyphs(c), parts: [{ x0: c.x0, x1: c.x1 }] };
+        cur = { x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1, n: glyphs(c), parts: [{ x0: c.x0, x1: c.x1 }], bgL: c.bg, bgR: c.bg, sep: isSep(c) };
       }
     }
     if (cur) words.push(cur);
@@ -219,6 +224,32 @@ export function textDistance(img, k = 4, tol = 14, opt = {}) {
     D[i] = Math.sqrt((dr * dr + dg * dg + db * db) / 3);
   }
   return D;
+}
+
+/** 两种底色差多少（和 D 一样按每通道均方根算） */
+const colorDiff = (a, b) => Math.sqrt(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) / 3);
+/** 两个字的底色明显不一样（一个在色块上、一个在白底上）：不能拼成一个词 */
+const BG_SPLIT = 30;
+const bgApart = (a, b) => !!(a && b && colorDiff(a, b) > BG_SPLIT);
+
+/**
+ * 每个字的底色：字的框里（上下各多一行）不是字的像素（D 小）的颜色中位数——字的笔画之间、上下紧挨着的就是它的底色。
+ * 这些像素颜色不一致（字横跨色块边缘、一半在色块上一半在白底上）就不定底色，照常拼词。
+ * 不用“最近的背景区域”：浅色色块和白底之间是渐变时，两块会被连成同一个区域，分不开。
+ */
+function attachBg(comps, img, D, T) {
+  const { data, width: W, height: H } = img;
+  for (const c of comps) {
+    const px = [];
+    for (let y = Math.max(0, c.y0 - 1); y < Math.min(H, c.y1 + 1); y++) for (let x = c.x0; x < c.x1; x++) {
+      const i = y * W + x;
+      if (D[i] <= T * 0.5) px.push(i * 4);
+    }
+    if (px.length < 6) continue;
+    const m = [0, 1, 2].map(k => median(px.map(p => data[p + k])));
+    const near = px.filter(p => colorDiff([data[p], data[p + 1], data[p + 2]], m) <= BG_SPLIT).length;
+    if (near >= px.length * 0.7) c.bg = m;
+  }
 }
 
 /** 3×3 平均（RGB） */
@@ -323,10 +354,24 @@ function rescueSwatches(img, D, comps, W) {
 }
 
 /**
+ * 一行词是不是“色号、数量”一对一对排开的：色号和自己的数量挨得近、和下一个色号离得远，相邻的间距一大一小交替。
+ * 格子里的色号、行列号是等距排开的，相邻间距差不多一样。返回间距“交替”的比例（0–1）
+ */
+function pairedSpacing(ws) {
+  const cx = ws.map(w => (w.x0 + w.x1) / 2).sort((a, b) => a - b);
+  const d = cx.slice(1).map((v, i) => v - cx[i]).filter(v => v > 0);
+  let alt = 0;
+  for (let i = 0; i + 1 < d.length; i++) if (Math.abs(d[i] - d[i + 1]) / Math.min(d[i], d[i + 1]) > 0.25) alt++;
+  return alt / Math.max(1, d.length - 1);
+}
+
+/**
  * 分析一张清单图：分割 → 连通域 → 按行聚类（每行有自己的字高，不同大小的字互不影响）→ 拼成词。
  * 返回 { words:[{x0,y0,x1,y1,n,hc,parts}], D, T, width, height }（原图坐标）
  */
 export function analyze(img, opt = {}) {
+  // opt.scale = 2：先放大两倍再分（字只有 6–10 像素高时，色块、数量框里留的底色太窄，原图上认不出是底色）
+  if (opt.scale === 2) return { ...analyze(upscale2(img), { ...opt, scale: 1 }), scale: 2 };
   const T = 30;
   // k=3：色块小、字大、色块上还有 JPEG 噪点时，色块也要能认成“背景”（k=4 时珍珠兔兔那张 29 色只认出 19 色）
   const D = textDistance(img, opt.k ?? 3, opt.tol ?? 14, opt);
@@ -334,6 +379,8 @@ export function analyze(img, opt = {}) {
   const raw = components(maskOf(D, T), W, H);
   let comps = (opt.rescue === false ? raw : rescueSwatches(img, D, raw, W))
     .filter(c => c.h >= 5 && c.h <= H * 0.6 && c.w <= c.h * 6 && c.area >= 6 && !(c.h < 8 && c.w < 3));
+  // 每个字的底色（色块补救改过 D 之后再算，色块上的字四周就是色块的颜色）
+  attachBg(comps, img, D, T);
   // 去掉色块/格子的边框：很“空”的大连通域，或者里面套着别的连通域的
   comps = comps.filter(a => {
     if (a.h > 12 && a.area / (a.w * a.h) < 0.1) return false;
@@ -361,8 +408,9 @@ export function analyze(img, opt = {}) {
   for (const line of lines) {
     const hc = line.hMed;
     const ws = groupWords(line.items, hc).map(wd => ({ ...wd, hc }));
-    // 一行里词特别多（格子里的色号、行列号）→ 不是清单，跳过；字太小（< 6px）也读不出来
-    if (ws.length > 40 || hc < 6) continue;
+    // 字太小（< 6px）读不出来；一行里词特别多（格子里的色号、行列号）→ 不是清单，跳过。
+    // 但清单排成一行的（20 多种颜色就有 40 多个词）照常读：它是“色号、数量”一对一对的，间距一大一小交替，格子和行列号是等距的
+    if (hc < 6 || (ws.length > 40 && (ws.length > 120 || pairedSpacing(ws) < 0.6))) continue;
     words.push(...ws);
   }
   // 同一行的字偶尔被分到两个“行”里（比如被色块边框干扰），把紧挨着的词再合并一次
@@ -376,8 +424,8 @@ export function analyze(img, opt = {}) {
       const hc = Math.max(a.hc, b.hc);
       const ov = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
       const gap = b.x0 - a.x1;
-      if (ov > Math.min(a.y1 - a.y0, b.y1 - b.y0) * 0.7 && gap > -hc * 0.2 && gap <= hc * 0.55 && a.hc / b.hc < 1.4 && b.hc / a.hc < 1.4) {
-        words[i] = { x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1), n: a.n + b.n, hc, parts: [...a.parts, ...b.parts] };
+      if (ov > Math.min(a.y1 - a.y0, b.y1 - b.y0) * 0.7 && gap > -hc * 0.2 && gap <= hc * 0.55 && a.hc / b.hc < 1.4 && b.hc / a.hc < 1.4 && !bgApart(a.bgR, b.bgL) && !a.sep && !b.sep) {
+        words[i] = { x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1), n: a.n + b.n, hc, parts: [...a.parts, ...b.parts], bgL: a.bgL, bgR: b.bgR };
         words[j] = null;
         j = i; // 重新检查合并后的词
         continue;
@@ -708,4 +756,142 @@ export function pairWords(words, normalizeCode) {
     return Math.abs(dy) > hMed * 0.8 ? dy : a.codeBox.x0 - b.codeBox.x0;
   });
   return items;
+}
+
+/** 2 倍双线性放大（RGBA） */
+function upscale2(img) {
+  const { data, width: w, height: h } = img, W = w * 2, H = h * 2;
+  const out = new Uint8ClampedArray(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    const fy = Math.min(h - 1.001, Math.max(0, (y + 0.5) / 2 - 0.5)), iy = Math.floor(fy), ty = fy - iy;
+    for (let x = 0; x < W; x++) {
+      const fx = Math.min(w - 1.001, Math.max(0, (x + 0.5) / 2 - 0.5)), ix = Math.floor(fx), tx = fx - ix;
+      const p = (iy * w + ix) * 4, q = (y * W + x) * 4;
+      for (let c = 0; c < 4; c++) out[q + c] = (data[p + c] * (1 - tx) + data[p + 4 + c] * tx) * (1 - ty) + (data[p + w * 4 + c] * (1 - tx) + data[p + w * 4 + 4 + c] * tx) * ty;
+    }
+  }
+  return { data: out, width: W, height: H };
+}
+
+/**
+ * 读一张清单：分词 → 每个词交给 readWord(ana, word) 识别（返回 { text, conf }）→ 配成“色号 + 数量”。
+ * 字很小（< 12 像素）时再放大两倍分一次词、读一遍，哪次读出的“色号 + 数量”多就用哪次（一样多用原图的）：
+ * 小字、压缩得厉害的截图，放大后色块和数量框才认得出是底色；字不太小的图放大反而容易把字拆散。
+ * upscale=false 不放大再读（Tesseract：它自己会把每个词放大，再放大一次反而多读错）。
+ * onWord(i, n)：进度；返回 { ana, pairs }（pairs 的坐标是 ana 里的，ana.scale 是放大倍数）
+ */
+export async function readLegend(img, readWord, normalizeCode, { onWord, opt = {}, upscale = true } = {}) {
+  const run = async scale => {
+    const ana = analyze(img, { ...opt, scale });
+    const words = [];
+    for (let i = 0; i < ana.words.length; i++) {
+      onWord?.(i + 1, ana.words.length);
+      words.push({ ...ana.words[i], ...(await readWord(ana, ana.words[i])) });
+    }
+    return { ana, pairs: pairWords(words, normalizeCode) };
+  };
+  const a = await run(1);
+  if (!upscale || (a.ana.words.length && !(a.ana.hc < 12))) return a;
+  const b = await run(2);
+  // 读出“色号 + 数量”的项数；同一个色号出现两次（肯定有读错的）、只有色号没有数量的（多半是把格子里的色号当成了清单）倒扣。
+  // 一样多用原图的。（在 14 张示例图和它们压缩、缩小过的 40 多个版本上定的）
+  const score = r => {
+    const codes = r.pairs.filter(p => p.code && p.count != null).map(p => p.code);
+    return codes.length - 2 * (codes.length - new Set(codes).size) - r.pairs.filter(p => p.code && p.count == null).length;
+  };
+  return score(b) > score(a) ? b : a;
+}
+
+/** 色块的颜色：框里（上下左右多 20%）出现最多的颜色（每通道 4 位量化）；字的笔画细，占不了多数 */
+export function swatchColor(img, b) {
+  const h = b.y1 - b.y0, m = h * 0.2;
+  const x0 = Math.max(0, Math.round(b.x0 - m)), x1 = Math.min(img.width, Math.round(b.x1 + m));
+  const y0 = Math.max(0, Math.round(b.y0 - m)), y1 = Math.min(img.height, Math.round(b.y1 + m));
+  const bins = new Map();
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const p = (y * img.width + x) * 4, k = (img.data[p] >> 4) << 8 | (img.data[p + 1] >> 4) << 4 | (img.data[p + 2] >> 4);
+    let e = bins.get(k);
+    if (!e) bins.set(k, e = [0, 0, 0, 0]);
+    e[0] += img.data[p]; e[1] += img.data[p + 1]; e[2] += img.data[p + 2]; e[3]++;
+  }
+  let best = null;
+  for (const e of bins.values()) if (!best || e[3] > best[3]) best = e;
+  return best ? [best[0] / best[3], best[1] / best[3], best[2] / best[3]] : null;
+}
+
+/**
+ * 读不清的色号再挑一次（色号读不出来、或者读得没把握的项）：
+ * 色号位置上那几个字，按色卡里的每个色号逐个算“像不像”（scoreCodes(box) → Map 色号 → CTC 对数概率），
+ * 再加一点“色块颜色和色卡颜色接近”的分（出图软件的颜色和色卡常有偏差，所以只占一小部分），
+ * 取最像的、而且这张清单里别的项没用过的。改过的项还是“把握不大”，核对时要看一眼；alts 是另外几个候选。
+ * 门槛（CTC 分 ≥ −10；色差 > 20 时要读得很清楚，分 ≥ −3）在 14 张示例图和 44 个压缩、缩小版本上调的：
+ * 宁可留“待填色号”，也不要多填错的。
+ * pairs 的坐标是 ana 里的（ana.scale 倍），img 是原图。
+ */
+export async function refineCodes(img, ana, pairs, scoreCodes, { rgbOf, deltaE, sigma = 16, onItem } = {}) {
+  const s = ana.scale || 1;
+  const used = new Set(pairs.filter(p => p.code && !p.uncertain).map(p => p.code));
+  const todo = pairs.filter(p => p.count != null && p.codeBox && (!p.code || p.uncertain));
+  const ranked = [];
+  for (let i = 0; i < todo.length; i++) {
+    onItem?.(i + 1, todo.length);
+    const p = todo[i], cb = p.codeBox;
+    const b = { x0: cb.x0 / s, y0: cb.y0 / s, x1: cb.x1 / s, y1: cb.y1 / s };
+    const pad = (b.y1 - b.y0) * 0.35;
+    const box = { x0: Math.max(0, b.x0 - pad), y0: Math.max(0, b.y0 - pad), x1: Math.min(img.width, b.x1 + pad), y1: Math.min(img.height, b.y1 + pad) };
+    const lik = await scoreCodes(box);
+    const rgb = rgbOf && deltaE ? swatchColor(img, b) : null;
+    const cand = [...lik].filter(([, l]) => Number.isFinite(l)).map(([code, l]) => {
+      const pc = rgb && rgbOf(code), d = pc ? deltaE(rgb, pc) : 0;
+      return { code, l, d, score: l - (d / sigma) ** 2 / 2 };
+    }).sort((a, b) => b.score - a.score)
+      // 太不像的不要：那里根本没有色号（标题里的数字、空白），或者颜色差得太远又读得不清楚——宁可留着“待填色号”
+      .filter(c => c.l >= -10 && (c.d <= 20 || c.l >= -3));
+    if (cand.length) ranked.push({ p, cand, margin: cand.length > 1 ? cand[0].score - cand[1].score : 99 });
+  }
+  // 最有把握的先定，后面的避开已经用过的色号
+  ranked.sort((a, b) => b.margin - a.margin);
+  for (const { p, cand } of ranked) {
+    const pick = cand.find(c => !used.has(c.code));
+    if (!pick) continue;
+    used.add(pick.code);
+    if (p.code !== pick.code) { p.code = pick.code; p.rawCode = p.rawCode || pick.code; }
+    p.uncertain = true;
+    p.alts = cand.filter(c => c.code !== pick.code).slice(0, 3).map(c => c.code);
+  }
+  return pairs;
+}
+
+/**
+ * 两遍读的结果合在一起（标准模型读的 a，高精度模型再读、逐个色号挑过的 b）。坐标都换成原图的（返回的 pairs 是原图坐标）。
+ * 以 b 为主；a 里有、b 里没有的项（按数量的位置对）补回来——高精度模型偶尔会把一项读丢，宁可留着让人核对；
+ * 同一项 a 有把握、b 是挑出来的（没把握），色号用 a 的；b 读出、a 没能确认的色号都标“把握不大”。
+ */
+export function mergeReads(a, b) {
+  const norm = r => r.pairs.map(p => {
+    const s = r.ana.scale || 1, m = x => x && { x0: x.x0 / s, y0: x.y0 / s, x1: x.x1 / s, y1: x.y1 / s };
+    return { ...p, codeBox: m(p.codeBox), countBox: m(p.countBox) };
+  });
+  const A = norm(a), B = norm(b);
+  const center = x => [(x.x0 + x.x1) / 2, (x.y0 + x.y1) / 2];
+  const inside = (x, box) => { const [cx, cy] = center(x); const m = (box.y1 - box.y0) * 0.3; return cx > box.x0 - m && cx < box.x1 + m && cy > box.y0 - m && cy < box.y1 + m; };
+  const used = new Set(B.filter(p => p.code).map(p => p.code));
+  for (const p of A) {
+    if (p.count == null || !p.countBox) continue;
+    const q = B.find(x => x.countBox && (inside(x.countBox, p.countBox) || inside(p.countBox, x.countBox)));
+    if (!q) {
+      if (p.code && used.has(p.code)) B.push({ ...p, code: null, uncertain: true });
+      else { B.push({ ...p, confirmed: !p.uncertain }); if (p.code) used.add(p.code); }
+      continue;
+    }
+    q.confirmed = !!(p.code && !p.uncertain && p.code === q.code);
+    if (p.code && !p.uncertain && (!q.code || q.uncertain) && p.code !== q.code && !used.has(p.code)) {
+      if (q.code) used.delete(q.code);
+      q.code = p.code; q.rawCode = p.rawCode; q.uncertain = false; q.confirmed = true; delete q.alts;
+      used.add(p.code);
+    }
+  }
+  // 高精度这遍读出来、标准模型那遍没能确认的色号：都标“把握不大”，核对时看一眼
+  for (const q of B) { if (q.code && !q.confirmed) q.uncertain = true; delete q.confirmed; }
+  return B;
 }

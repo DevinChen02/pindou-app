@@ -2,8 +2,8 @@
 //   PP-OCR：PP-OCRv5 mobile（vendor/ppocr + vendor/ort，约 19 MB）——示例图上明显更准，默认
 //   （读拼豆板格子上的色号另外可选 PP-OCRv6 small，见 REC_MODELS）
 //   Tesseract：（vendor/tesseract，约 7 MB）——PP-OCR 加载失败时自动退回
-import { analyze, wordImage, pairWords, OCR_ATTEMPTS, plausibleToken, lengthMatches } from './ocr-core.js';
-import { normalizeCode, ocrWhitelist } from '../palette.js';
+import { readLegend, refineCodes, mergeReads, wordImage, OCR_ATTEMPTS, plausibleToken, lengthMatches } from './ocr-core.js';
+import { normalizeCode, ocrWhitelist, CODES, rgbOf, deltaE } from '../palette.js';
 import { getImageData, makeCanvas } from '../image.js';
 
 let workerPromise = null;
@@ -117,6 +117,14 @@ function toCanvas(img) {
   return c;
 }
 
+/** 高精度模型读清单时补宽到多宽（PP-OCRv6 按 48×320 训练，短的字补宽后更准） */
+const HP_MIN_W = 320;
+/** 读得干净：每项都有有把握的色号、色号不重复 */
+function legendClean(pairs) {
+  const c = pairs.filter(p => p.count != null), codes = c.map(p => p.code).filter(Boolean);
+  return c.length > 0 && c.every(p => p.code && !p.uncertain) && new Set(codes).size === codes.length;
+}
+
 /**
  * 识别 canvas 上 rect 区域里的色号清单。
  * 返回 { items: [{ code, rawCode, count, box(原图坐标), uncertain }], lowRes }
@@ -142,24 +150,22 @@ export async function ocrExtract(settings, canvas, rect, { onStatus, signal } = 
   }
   onStatus?.('分析清单区域…');
   const img = getImageData(canvas, rect);
-  const ana = analyze({ data: img.data, width: img.width, height: img.height });
   const allow = [...new Set(ocrWhitelist() + ' ')];
-  const words = [];
-  for (let i = 0; i < ana.words.length; i++) {
-    if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
-    onStatus?.(`识别文字 ${i + 1}/${ana.words.length}…`);
-    const wd = ana.words[i];
-    if (pp) {
-      // PP-OCRv5：直接读原图上这个词的位置（四周留一点边），只允许清单里会出现的字
-      const s = ana.scale || 1, pad = Math.round((wd.hc || ana.hc) * 0.35);
-      const b = {
-        x0: Math.max(0, (wd.x0 - pad) / s), y0: Math.max(0, (wd.y0 - pad) / s),
-        x1: Math.min(img.width, (wd.x1 + pad) / s), y1: Math.min(img.height, (wd.y1 + pad) / s),
-      };
-      const r = await pp.recognize(img, b, { allow });
-      words.push({ ...wd, text: r.text.replace(/\s+/g, ''), conf: r.conf * 100 });
-      continue;
-    }
+  // 每个词怎么读：PP-OCR 直接读原图上这个词的位置（四周留一点边，analyze 放大过的话换回原图坐标）；
+  // Tesseract 读按字高放大、二值化后的小图，换几种参数试
+  const check = () => { if (signal?.aborted) throw new DOMException('已取消', 'AbortError'); };
+  const ppRead = (P, minW) => async (ana, wd) => {
+    check();
+    const s = ana.scale || 1, pad = Math.round((wd.hc || ana.hc) * 0.35);
+    const b = {
+      x0: Math.max(0, (wd.x0 - pad) / s), y0: Math.max(0, (wd.y0 - pad) / s),
+      x1: Math.min(img.width, (wd.x1 + pad) / s), y1: Math.min(img.height, (wd.y1 + pad) / s),
+    };
+    const r = await P.recognize(img, b, { allow, minW });
+    return { text: r.text.replace(/\s+/g, ''), conf: r.conf * 100 };
+  };
+  const tessRead = async (ana, wd) => {
+    check();
     let best = null;
     for (const att of OCR_ATTEMPTS) {
       await worker.setParameters({ tessedit_pageseg_mode: att.psm });
@@ -170,22 +176,52 @@ export async function ocrExtract(settings, canvas, rect, { onStatus, signal } = 
       if (!best || rank(r) > rank(best) || (rank(r) === rank(best) && r.conf > best.conf)) best = r;
       if (r.ok && r.len && r.conf >= 75) break;
     }
-    words.push({ ...wd, text: best.text, conf: best.conf });
+    return { text: best.text, conf: best.conf };
+  };
+  const src = { data: img.data, width: img.width, height: img.height };
+  // 字很小时原图、放大两倍各读一遍，取读得好的那次（见 readLegend；只用于 PP-OCR）
+  const progress = label => {
+    let pass = 0;
+    return (i, n) => { if (i === 1) pass++; onStatus?.(`${label}${i}/${n}${pass > 1 ? '（字太小，放大再读一遍）' : ''}…`); };
+  };
+  const first = await readLegend(src, pp ? ppRead(pp) : tessRead, normalizeCode, { upscale: !!pp, onWord: progress('识别文字 ') });
+  let { ana, pairs } = first;
+  let s = ana.scale || 1; // pairs 的坐标是 ana 里的（放大过就是放大后的）
+  // 有读不清的（色号没读出来、读得没把握、同一个色号出现两次）：换高精度模型（PP-OCRv6 small）再读一遍，
+  // 色号位置上的字再按色卡里的每个色号逐个比“像不像”（加一点色块颜色），挑最像的。慢几倍，但小字、糊图读对的多很多
+  if (pp && !legendClean(pairs)) {
+    let hp = null;
+    try {
+      onStatus?.('有几项读不清，换高精度模型再读一遍…');
+      hp = await getPP(m => { if (m.progress < 1) onStatus?.(`下载高精度识字模型…${Math.round(m.progress * 100)}%`); }, 'v6s');
+    } catch (e) { console.warn('高精度模型加载失败，用标准模型的结果', e); }
+    if (hp) {
+      const b = await readLegend(src, ppRead(hp, HP_MIN_W), normalizeCode, { onWord: progress('高精度模型再读 ') });
+      const codeChars = [...new Set(CODES.join('') + ' ')];
+      const scoreCodes = async box => {
+        check();
+        const r = await hp.recognize(img, box, { allow: codeChars, keepLogits: true, minW: HP_MIN_W });
+        return new Map(CODES.map(c => [c, hp.lexiconScore(r, c)]));
+      };
+      await refineCodes(img, b.ana, b.pairs, scoreCodes, { rgbOf, deltaE, onItem: (i, n) => onStatus?.(`逐个色号比对读不清的字 ${i}/${n}…`) });
+      // 两遍合起来：以高精度这遍为主，标准模型读到、它读丢了的项补回来（合并后是原图坐标）
+      pairs = mergeReads(first, b);
+      ana = b.ana; s = 1;
+    }
   }
-  const pairs = pairWords(words, normalizeCode);
-  const s = ana.scale;
   const map = b => b && { x0: rect.x + b.x0 / s, y0: rect.y + b.y0 / s, x1: rect.x + b.x1 / s, y1: rect.y + b.y1 / s };
   const items = pairs.map(p => {
     // 色块区域：色号字周围扩一圈（字在色块中间）
     const cb = map(p.codeBox);
     const h = cb.y1 - cb.y0;
     return {
-      code: p.code, rawCode: p.rawCode, count: p.count, uncertain: p.uncertain,
+      code: p.code, rawCode: p.rawCode, count: p.count, uncertain: p.uncertain, alts: p.alts,
       box: { x0: cb.x0 - h * 0.5, y0: cb.y0 - h * 0.5, x1: cb.x1 + h * 0.5, y1: cb.y1 + h * 0.5 },
       textBox: cb, countBox: map(p.countBox),
     };
   });
-  return { items, lowRes: ana.hc / s < 10, charHeight: ana.hc / s, engine };
+  const hc = ana.hc / (ana.scale || 1);
+  return { items, lowRes: hc < 10, charHeight: hc, engine };
 }
 
 /** 设置页自检：画一张小图让 OCR 读，确认引擎和语言包都能加载 */

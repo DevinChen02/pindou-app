@@ -160,6 +160,9 @@ function renderCard(app) {
       h('span', '图中取色'), h('span.sw', { style: { background: `rgb(${item.rgb.join(',')})` } }),
       item.code ? [h('span', '标准色'), h('span.sw', { style: { background: hexOf(item.code) } })] : null,
       cc.status === 'match' ? h('span.tag.ok', '颜色一致') : cc.status === 'near' ? h('span.tag', '颜色接近') : cc.status === 'mismatch' ? h('span.tag.warn', '颜色差别大') : null) : null,
+    item.alts?.length && item.code === item.orig?.code ? h('div.row.wrap.gap-s.small.v-alts', { style: { marginTop: '6px' } },
+      h('span.muted', '字很糊，按字形看也可能是：'),
+      item.alts.map(c => h('button.code-cell', { onclick: () => update({ code: c }) }, chip(c, { size: 'sm' })))) : null,
     cc && cc.status !== 'match' && cc.suggestions.length ? h('div.row.wrap.gap-s.small', { style: { marginTop: '6px' } },
       h('span.muted', '按颜色看可能是：'),
       cc.suggestions.slice(0, 3).map(c => h('button.code-cell', { onclick: () => update({ code: c }) }, chip(c, { size: 'sm' })))) : null,
@@ -168,7 +171,7 @@ function renderCard(app) {
       h('span.lbl', '色号'),
       h('button.code-btn', {
         onclick: async () => {
-          const c = await pickCode({ current: item.code, suggestions: cc?.suggestions || [] });
+          const c = await pickCode({ current: item.code, suggestions: [...new Set([...(item.alts || []), ...(cc?.suggestions || [])])] });
           if (c) update({ code: c });
         },
       }, chip(item.code || '?', { size: 'sm' }), h('span', item.code ? '点这里更改' : '点这里选择色号'), h('span.chev', '›')),

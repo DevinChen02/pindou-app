@@ -79,17 +79,17 @@ export async function createPPOCR({ ort, det, rec, dict, recMinW = 0 }) {
   }
 
   /**
-   * 识别一个框里的一行字。allow：只允许这些字（其余字的概率置零，“封闭字表”）。
+   * 识别一个框里的一行字。allow：只允许这些字（其余字的概率置零，“封闭字表”）。minW：这一次补宽到多宽（默认 recMinW）。
    * 返回 { text, conf, chars:[{ ch, x, p }], logp（每帧对数概率，给 lexiconScore 用）, T, C }
    */
-  async function recognize(img, box, { allow = null, keepLogits = false } = {}) {
+  async function recognize(img, box, { allow = null, keepLogits = false, minW = recMinW } = {}) {
     const bw = box.x1 - box.x0, bh = box.y1 - box.y0;
     const H = 48;
     const W = Math.max(16, Math.min(1600, Math.round(H * bw / bh / 8) * 8));
     let data = toTensorData(img, box.x0, box.y0, bw, bh, W, H, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]), Wt = W;
-    if (recMinW > W) {
+    if (minW > W) {
       // 右边补 0（归一化后的 0，也就是中灰），和训练时的做法一样
-      Wt = recMinW;
+      Wt = minW;
       const pad = new Float32Array(3 * H * Wt);
       for (let c = 0; c < 3; c++) for (let y = 0; y < H; y++) pad.set(data.subarray((c * H + y) * W, (c * H + y + 1) * W), (c * H + y) * Wt);
       data = pad;

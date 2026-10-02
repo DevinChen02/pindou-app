@@ -193,10 +193,14 @@ function extendGrid(img, xs, ys, R, headerLike) {
     const hasBead = labs.some(l => !isEmptyColor(l));
     // 编号栏在继续：外侧那一格有字，而且和上一排外侧那格颜色一样
     const [lab, prev] = labelCells;
-    const labelled = lab && prev && lab.ink > 0.04 && dLab(labOf(lab), labOf(prev)) < 8;
+    // （编号是很细的一位数“1”时字太少，看不出“有字”：编号栏是一条和空格不同色的底，颜色接得上也算）
+    const labelled = lab && prev && (lab.ink > 0.04 || !isEmptyColor(labOf(lab))) && dLab(labOf(lab), labOf(prev)) < 8;
     return hasBead || labelled;
   };
   const cellAt = (x0, y0, x1, y1) => sampleCells(img, [x0, x1], [y0, y1])[0];
+  // 编号栏那一格：贴着图边、只露出一大半也算（有的图纸行号那一列被图边切掉了一点）
+  const lx = Math.round(xs[0] - px), ly = Math.round(ys[0] - py);
+  const labX = lx >= 0 ? lx : xs[0] >= px * 0.6 ? 0 : null, labY = ly >= 0 ? ly : ys[0] >= py * 0.6 ? 0 : null;
   for (let guard = 0; guard < 3; guard++) {
     let changed = false;
     // 下
@@ -204,14 +208,14 @@ function extendGrid(img, xs, ys, R, headerLike) {
     if (yb <= R.ry1 + 2 && yb < img.height) {
       const y0 = ys[ys.length - 1];
       const cells = sampleCells(img, xs, [y0, yb]);
-      const lab = xs[0] - px >= 0 ? [cellAt(Math.round(xs[0] - px), y0, xs[0], yb), cellAt(Math.round(xs[0] - px), ys[ys.length - 2], xs[0], y0)] : [];
+      const lab = labX != null ? [cellAt(labX, y0, xs[0], yb), cellAt(labX, ys[ys.length - 2], xs[0], y0)] : [];
       if (ok(cells, lab)) { ys = [...ys, yb]; changed = true; }
     }
     // 上
     const yt = Math.round(ys[0] - py);
     if (yt >= R.ry0 - 2 && yt >= 0) {
       const cells = sampleCells(img, xs, [yt, ys[0]]);
-      const lab = xs[0] - px >= 0 ? [cellAt(Math.round(xs[0] - px), yt, xs[0], ys[0]), cellAt(Math.round(xs[0] - px), ys[0], xs[0], ys[1])] : [];
+      const lab = labX != null ? [cellAt(labX, yt, xs[0], ys[0]), cellAt(labX, ys[0], xs[0], ys[1])] : [];
       if (ok(cells, lab)) { ys = [yt, ...ys]; changed = true; }
     }
     // 右
@@ -219,14 +223,14 @@ function extendGrid(img, xs, ys, R, headerLike) {
     if (xr <= R.rx1 + 2 && xr < img.width) {
       const x0 = xs[xs.length - 1];
       const cells = sampleCells(img, [x0, xr], ys);
-      const lab = ys[0] - py >= 0 ? [cellAt(x0, Math.round(ys[0] - py), xr, ys[0]), cellAt(xs[xs.length - 2], Math.round(ys[0] - py), x0, ys[0])] : [];
+      const lab = labY != null ? [cellAt(x0, labY, xr, ys[0]), cellAt(xs[xs.length - 2], labY, x0, ys[0])] : [];
       if (ok(cells, lab)) { xs = [...xs, xr]; changed = true; }
     }
     // 左
     const xl = Math.round(xs[0] - px);
     if (xl >= R.rx0 - 2 && xl >= 0) {
       const cells = sampleCells(img, [xl, xs[0]], ys);
-      const lab = ys[0] - py >= 0 ? [cellAt(xl, Math.round(ys[0] - py), xs[0], ys[0]), cellAt(xs[0], Math.round(ys[0] - py), xs[1], ys[0])] : [];
+      const lab = labY != null ? [cellAt(xl, labY, xs[0], ys[0]), cellAt(xs[0], labY, xs[1], ys[0])] : [];
       if (ok(cells, lab)) { xs = [xl, ...xs]; changed = true; }
     }
     if (!changed) break;
@@ -476,15 +480,48 @@ function digitizeOnce(img, { region, refs, locks = null, dewatermark = false }) 
     // 底色一致（水印、半透明编号栏会让一部分格子颜色偏一点；编号特征很明显时放宽）
     return same >= labs.length * (strongStep ? 0.6 : 0.9);
   };
+  // 编号栏外面还有一两排“格子”（编号栏和清单之间的空白、清单方框的边也被当成了格线）：
+  // 最外面 3 排里有一排明显是编号栏（像表头，而且 1~9 一位数、10 起两位数，字的多少有台阶）→ 连它和它外面的一起去掉
+  // 网格里最多的颜色（空格的颜色）
+  const emptyLab = (() => {
+    const bins = new Map();
+    for (const st of stats) {
+      if (!st) continue;
+      const l = rgbToLab(st.rgb), k = l.map(v => Math.round(v / 4)).join(',');
+      const b = bins.get(k) || { n: 0, l }; b.n++; bins.set(k, b);
+    }
+    let best = null; for (const b of bins.values()) if (!best || b.n > best.n) best = b;
+    return best?.l;
+  })();
+  const rulerLike = list => {
+    const all = list.map(s => (s ? s.ink : 0));
+    if (all.length < 14 || !emptyLab) return false;
+    const avg = a => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
+    const step = avg(all.slice(0, 9)) < avg(all.slice(9)) * 0.75 || avg(all.slice(-9)) < avg(all.slice(0, -9)) * 0.75;
+    if (!step || !headerLike(list)) return false;
+    // 编号栏是一整条同色的底（灰条），和空格的颜色不一样；图案里碰巧像表头的一排没有这么整齐
+    const labs = list.filter(Boolean).map(st => rgbToLab(st.rgb));
+    const med = labs.slice().sort((a, b) => a[0] - b[0])[labs.length >> 1];
+    return labs.filter(l => dLab(l, med) < 6).length >= list.length * 0.9 && dLab(med, emptyLab) > 6;
+  };
+  const beyondHeader = (list, n) => {
+    for (let k = 1; k <= 2 && k < n - 3; k++) if (rulerLike(list(k))) return k + 1;
+    return 0;
+  };
   let trimmed = true, guard = 0;
-  while (trimmed && guard++ < 6 && rows > 3 && cols > 3) {
+  while (trimmed && guard++ < 8 && rows > 3 && cols > 3) {
     trimmed = false;
     const rowList = r => Array.from({ length: cols }, (_, c) => at(r, c));
     const colList = c => Array.from({ length: rows }, (_, r) => at(r, c));
+    let k;
     if (headerLike(rowList(0))) { ys = ys.slice(1); trimmed = true; }
     else if (headerLike(rowList(rows - 1))) { ys = ys.slice(0, -1); trimmed = true; }
     else if (headerLike(colList(0))) { xs = xs.slice(1); trimmed = true; }
     else if (headerLike(colList(cols - 1))) { xs = xs.slice(0, -1); trimmed = true; }
+    else if ((k = beyondHeader(i => rowList(i), rows))) { ys = ys.slice(k); trimmed = true; }
+    else if ((k = beyondHeader(i => rowList(rows - 1 - i), rows))) { ys = ys.slice(0, -k); trimmed = true; }
+    else if ((k = beyondHeader(i => colList(i), cols))) { xs = xs.slice(k); trimmed = true; }
+    else if ((k = beyondHeader(i => colList(cols - 1 - i), cols))) { xs = xs.slice(0, -k); trimmed = true; }
     if (trimmed) { rows = ys.length - 1; cols = xs.length - 1; stats = cellsOf(xs, ys); }
   }
 

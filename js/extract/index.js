@@ -84,6 +84,8 @@ export async function extractImage(method, settings, work, imgIndex, { onStatus,
       code: code || null, rawCode: it.rawCode || '', count: it.count ?? null,
       box: toDisplayBox(it.box, disp), countBox: toDisplayBox(it.countBox || null, disp), rgb, swatch,
       uncertain: !!it.uncertain || lowRes,
+      // 字太糊、按色卡逐个色号挑出来的：另外几个也比较像的色号（核对时给按钮）
+      alts: Array.isArray(it.alts) && it.alts.length ? it.alts.slice(0, 3) : undefined,
       verified: false,
       orig: { code: code || null, count: it.count ?? null },
     };
