@@ -6,6 +6,8 @@ const pending = new Map();
 async function local(op, img, args) {
   if (op === 'clean') return (await import('./cells.js')).dewatermarkImage(img, args.xs, args.ys, args.cells);
   if (op === 'stitch') return (await import('./stitch.js')).stitchPlan(args.imgs);
+  if (op === 'photo') return (await import('./photo.js')).convertPhoto(img, args);
+  if (op === 'photoGrid') return (await import('./photo.js')).detectPixelGrid(img);
   const m = await import('./board.js');
   return op === 'digitize' ? m.digitize(img, args) : m.classifyGrid(img, args.xs, args.ys, args.refs, args.opt);
 }
@@ -31,7 +33,8 @@ function getWorker() {
 
 /**
  * op: 'digitize'（args = { region, refs, locks, dewatermark }）、'classify'（args = { xs, ys, refs, opt }）、
- * 'clean'（去水印后的图，args = { xs, ys, cells }）或 'stitch'（多张截图找重叠，img = null，args = { imgs }）
+ * 'clean'（去水印后的图，args = { xs, ys, cells }）、'stitch'（多张截图找重叠，img = null，args = { imgs }）、
+ * 'photo'（普通图片转成图纸，args 见 photo.js convertPhoto）或 'photoGrid'（找像素画原来的像素格）
  */
 export function runBoard(op, img, args) {
   const wk = getWorker();

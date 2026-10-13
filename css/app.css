@@ -829,3 +829,24 @@ main.build-view > .ro-banner { border-radius: 0; margin: 0; }
 .gh-status { margin: 8px 0 4px; }
 .gh-status.ok { color: var(--ok); } .gh-status.bad { color: var(--bad); }
 .tiny.bad { color: var(--bad); }
+
+/* 添加图纸：图纸截图 / 普通图片 */
+.kind-seg { margin: 2px 0 6px; }
+.kind-note { margin: 6px 2px 10px; }
+.photo-panel .help ul { padding-left: 18px; margin: 8px 0 2px; }
+.photo-panel .help li { margin: 4px 0; }
+/* 生成图纸 */
+.pg-prev { position: relative; display: flex; justify-content: center; margin: 4px 0 6px; }
+.pg-prev canvas { border-radius: 10px; box-shadow: var(--shadow); cursor: zoom-in; touch-action: manipulation; }
+.pg-busy { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: color-mix(in srgb, var(--bg) 45%, transparent); border-radius: 10px; }
+.pg-busy .spinner { margin: 0; }
+.pg-sum { margin: 6px 2px 0; gap: 8px; }
+.pg-sizes .tagopt, .pg-limits .tagopt { font-variant-numeric: tabular-nums; min-width: 48px; }
+.pg-opts { padding: 2px 14px; }
+.pg-opts .kv .d { margin-top: 2px; }
+.pg-chip { cursor: pointer; font: inherit; color: var(--text); }
+.pg-chip.short { border-color: var(--bad); }
+.pg-undo { border: 0; cursor: pointer; font: inherit; font-size: 12.5px; padding: 3px 10px; }
+.pg-colors .pg-short { display: flex; align-items: center; flex-wrap: wrap; }
+.pv-gen { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; font: inherit; color: var(--text); background: var(--card); border: 0; border-radius: var(--radius); box-shadow: var(--shadow); padding: 10px 12px; margin: 10px 0; cursor: pointer; }
+.pv-gen img { width: 64px; height: 64px; object-fit: contain; image-rendering: pixelated; border-radius: 8px; background: var(--card-2); flex-shrink: 0; }

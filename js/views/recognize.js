@@ -9,6 +9,7 @@ import { hasViewable } from '../viewer.js';
 import { renderPreview } from './preview.js';
 import { openImageViewer } from '../viewer.js';
 import { autoMerge, manualMerge } from '../merge.js';
+import { renderPhoto, pickPhoto } from './photo.js';
 
 const METHOD_TIPS = {
   vlm: '把截图发给云端大模型读取清单。版式再怪也能读，需联网、按次计费。',
@@ -18,11 +19,14 @@ const METHOD_TIPS = {
 
 export async function renderRecognize(app) {
   const r = app.rec;
+  // 生成的图纸不用核对：直接是保存那一步
+  if (r.step === 'verify' && r.session?.method === 'photo') r.step = 'preview';
   if (r.step === 'verify') return renderVerify(app);
   if (r.step === 'preview') return renderPreview(app);
   if (r.step === 'merge') return renderMerge(app);
   if (r.step === 'crop') return renderCrop(app);
   if (r.step === 'running') return renderRunning(app);
+  if (r.step === 'photo') return renderPhoto(app);
   return renderPick(app);
 }
 
@@ -38,13 +42,15 @@ async function renderPick(app) {
   if (!enabled.includes(r.method)) r.method = enabled.includes(s.defaultMethod) ? s.defaultMethod : enabled[0] || null;
 
   const saved = await store.loadSession();
-  if (saved && saved.items?.length) {
-    const done = saved.items.filter(i => i.verified).length;
-    view.append(h('div.banner.info',
-      h('span.ico', '📝'),
-      h('div.grow', h('b', '有一次没核对完的识别'), h('div.small.muted', `${saved.name || ''} 已核对 ${done}/${saved.items.length} 项`)),
-      h('button.btn.sm.primary', { onclick: () => { r.session = saved; r.method = saved.method; r.step = saved.step === 'preview' ? 'preview' : 'verify'; app.render(); } }, '继续')));
-  }
+  if (saved && saved.items?.length) view.append(savedBanner(app, saved));
+
+  // 两种添加方式：识别已经画好的图纸截图（读清单），或者把一张普通图片生成新图纸
+  const kind = r.kind === 'photo' ? 'photo' : 'chart';
+  view.append(h('div.seg.kind-seg',
+    h('button' + (kind === 'chart' ? '.on' : ''), { 'data-kind': 'chart', onclick: () => { r.kind = 'chart'; app.rerender(); } }, '📋 图纸截图'),
+    h('button' + (kind === 'photo' ? '.on' : ''), { 'data-kind': 'photo', onclick: () => { r.kind = 'photo'; app.rerender(); } }, '🎨 普通图片')));
+  if (kind === 'photo') { view.append(photoPanel(app)); return; }
+  view.append(h('p.small.muted.kind-note', '已经画好格子、写着色号和数量的图纸截图：读出每种颜色要多少颗。'));
 
   if (!enabled.length) {
     view.append(h('div.card',
@@ -66,6 +72,38 @@ async function renderPick(app) {
   if (r.method === 'text') view.append(textPanel(app));
   else view.append(imagePanel(app));
   view.append(manualEntry(app));
+}
+
+/** 上次没做完的（识别没核对完 / 生成的图纸没保存）：继续 */
+export function savedBanner(app, saved, { onGo } = {}) {
+  const r = app.rec;
+  const go = () => { app.pat.page = 'add'; r.session = saved; r.method = saved.method; r.step = saved.step === 'preview' ? 'preview' : 'verify'; if (onGo) onGo(); app.render(); };
+  const photo = saved.method === 'photo';
+  const done = saved.items.filter(i => i.verified).length;
+  return h('div.banner.info.saved-banner',
+    h('span.ico', photo ? '🎨' : '📝'),
+    h('div.grow', h('b', photo ? '有一张生成的图纸还没保存' : '有一次没核对完的识别'),
+      h('div.small.muted', photo ? `${saved.name || ''} · ${saved.items.length} 色` : `${saved.name || ''} 已核对 ${done}/${saved.items.length} 项`)),
+    h('button.btn.sm.primary', { onclick: go }, '继续'));
+}
+
+/** 普通图片 → 生成图纸 */
+function photoPanel(app) {
+  const input = h('input', { type: 'file', accept: 'image/*' });
+  input.addEventListener('change', () => { const f = input.files?.[0]; if (f) pickPhoto(app, f); });
+  return h('div.photo-panel',
+    h('p.small.muted', '照片、插画、像素画都可以：按你选的尺寸缩成一格一格，每格换成', h('b', '当前色卡'), '里最接近的颜色，生成一张新图纸。之后和别的图纸一样：开始拼豆、扣库存、在 iPad 上拼。'),
+    h('label.drop', input,
+      h('div.big-ico', '🎨'),
+      h('b', '选择一张图片'),
+      h('div.small', '透明背景的地方不放豆子；放大过的像素画会认出原来的像素，一格一颗')),
+    h('details.help',
+      h('summary', '怎么选尺寸、颜色？'),
+      h('ul.small',
+        h('li', '尺寸是最长的一边几颗豆子：52×52 的拼豆板中间是 50 颗，78×78 是 70 颗，104×104 是 100 颗。越大越像原图，也越费豆子。'),
+        h('li', '颜色数：默认最多 16 种，挑最能还原整张图的那几种；可以只用库存里有的颜色。'),
+        h('li', '生成后点某个颜色可以整种换掉，或者不用它（自动换成最接近的）。'),
+        h('li', '保存后点“开始拼豆”，选好拼豆板尺寸、摆好位置就能拼（不用框选、核对）。'))));
 }
 
 function manualEntry(app) {

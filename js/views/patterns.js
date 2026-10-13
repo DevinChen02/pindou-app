@@ -4,7 +4,8 @@ import * as store from '../store.js';
 import { readOnlyToast } from '../license.js';
 import { newId } from '../extract/index.js';
 import { openImageViewer, entriesFromImages } from '../viewer.js';
-import { renderRecognize } from './recognize.js';
+import { renderRecognize, savedBanner } from './recognize.js';
+import { isGenerated, regenerate } from './photo.js';
 import { renderBuild } from './build.js';
 
 // q：搜索词；status：状态筛选；tags：选中的分类（同时满足）；select：多选模式下选中的图纸 id
@@ -79,19 +80,13 @@ async function renderList(app) {
 
   // 没核对完的识别
   const saved = await store.loadSession();
-  if (!sel && saved?.items?.length && !saved.patternId) {
-    const done = saved.items.filter(i => i.verified).length;
-    view.append(h('div.banner.info', { style: { cursor: 'pointer' }, onclick: () => { app.pat.page = 'add'; app.rec.session = saved; app.rec.step = saved.step === 'preview' ? 'preview' : 'verify'; app.rec.method = saved.method; app.render(); } },
-      h('span.ico', '📝'),
-      h('div.grow', h('b', '有一张图纸还没核对完'), h('div.small.muted', `${saved.name || ''} · 已核对 ${done}/${saved.items.length} 项`)),
-      h('span.link', '继续 ›')));
-  }
+  if (!sel && saved?.items?.length && !saved.patternId) view.append(savedBanner(app, saved));
 
   if (!list.length) {
     ui.select = null;
     view.append(h('div.empty',
       h('div.big-ico', '🧩'),
-      h('p', '还没有图纸。添加一张图纸截图，自动读出要用的颜色和颗数。'),
+      h('p', '还没有图纸。添加一张图纸截图，自动读出要用的颜色和颗数；或者选一张普通图片，用色卡生成新图纸。'),
       h('button.btn.primary.big', { onclick: () => startAdd(app) }, '＋ 添加第一张图纸')));
     return;
   }
@@ -202,6 +197,8 @@ function card(app, p, sel) {
 function startAdd(app) {
   // 试用到期 / 被停用：不能再扫新的图
   if (app.readOnly) { readOnlyToast(app.readOnly); return; }
+  // 上次是从某张图纸“重新生成”进去、没保存就走开了：那个不算“添加”
+  if (app.rec.photo?.pid) { app.rec.photo = null; if (app.rec.step === 'photo') app.rec.step = 'pick'; }
   app.pat.page = 'add';
   if (!app.rec.session) app.rec.step = 'pick';
   app.render();
@@ -230,7 +227,8 @@ async function renderDetail(app) {
       h('div.grow',
         h('div.pd-name', h('b', p.name || '未命名'), h('button.icon-btn.sm', { 'aria-label': '改名', onclick: () => renameSheet(app, p) }, '✎')),
         h('div.row.gap-s.wrap', { style: { marginTop: '4px' } }, h('span.tag.' + cls, label), h('span.small.muted', `${p.items.length} 色 · ${fmtNum(total)} 颗`)),
-        h('div.small.muted', { style: { marginTop: '2px' } }, `添加于 ${fmtTime(p.createdAt)}`))),
+        h('div.small.muted', { style: { marginTop: '2px' } }, `添加于 ${fmtTime(p.createdAt)}`),
+        isGenerated(p) ? h('div.small.muted.pd-gen', { style: { marginTop: '2px' } }, `🎨 由图片生成 · ${p.gen.cols} × ${p.gen.rows} 格`) : null)),
     h('div.pd-tags',
       (p.tags || []).map(t => h('span.tagchip.big', '#' + t)),
       h('button.tagadd', { onclick: () => tagSheet(app, p) }, p.tags?.length ? '✎ 分类' : '＋ 加分类'))));
@@ -298,6 +296,7 @@ async function renderDetail(app) {
         ...low.map(r => `${r.code}：拼完剩 ${r.after} 颗（补货线 ${r.threshold}）`)].join('\n')) }, '复制补货清单'));
     }
     view.append(h('div.pd-more',
+      isGenerated(p) && !app.readOnly && !store.buildTouched(p) ? h('div', { style: { marginBottom: '8px' } }, h('button.link.pd-regen-link', { onclick: () => regenerate(app, p) }, '🎨 换尺寸、颜色？重新生成 ›')) : null,
       h('button.link', { onclick: () => directFinish(app, p) }, '不用拼豆板，已经拼完了 → 按清单数量直接扣减库存 ›')));
   } else {
     view.append(h('div.section-title', '用到的颜色'));
@@ -313,7 +312,9 @@ function moreSheet(app, p) {
   const s = sheet(h('div.menu',
     h('button', { onclick: () => { s.close(); renameSheet(app, p); } }, '✎ 改名'),
     h('button', { onclick: () => { s.close(); tagSheet(app, p); } }, '🏷 分类'),
-    h('button', { onclick: () => { s.close(); editItems(app, p); } }, '🎨 修改颜色和数量'),
+    isGenerated(p)
+      ? h('button.pd-regen', { onclick: () => { s.close(); regenerate(app, p); } }, '🎨 重新生成（换尺寸、颜色）')
+      : h('button', { onclick: () => { s.close(); editItems(app, p); } }, '🎨 修改颜色和数量'),
     p.images?.some(im => im.fullId) ? h('button', { onclick: () => { s.close(); viewPattern(p); } }, '🖼 看原图') : null,
     h('button', { onclick: () => { s.close(); again(app, p); } }, '🔁 复制一份（再拼一次）'),
     h('button.danger', {

@@ -14,6 +14,7 @@ import { goPattern, finishAndShow, revertPending } from './patterns.js';
 import { renderSetup, startSetup, setupActive } from './boardsetup.js';
 import { ipadSheet, sentToIpad, scanProgress } from './ipad-send.js';
 import { readOnlyText } from '../license.js';
+import { isGenerated } from './photo.js';
 
 // 别的页面（准备拼豆板、测试）从这里拿画拼豆板的函数
 export { placeOf, guideStart, guideLines, cellNum, cellWhere, boardSize, drawBoard, orderItems, BUILD_ORDERS, BUILD_SHOWS } from '../boardview.js';
@@ -154,7 +155,9 @@ export async function renderBuild(app) {
       h('p', h('b', hasImg ? '现在只按颜色打勾（没用拼豆板）' : '这张图纸没有原图，没法生成拼豆板')),
       p.boardError ? h('p.small.muted', `原因：${p.boardError}`) : null,
       h('p.small.muted', '下面按颜色打勾也能记录进度。'),
-      hasImg ? h('button.btn.soft', { onclick: async () => { startSetup(p, 'frame'); await store.patchPattern(p.id, { boardSkip: false }); app.rerender(); } }, '🔲 框出拼豆板，生成拼豆板') : null));
+      isGenerated(p) && p.board
+        ? h('button.btn.soft', { onclick: async () => { startSetup(p, 'peg'); await store.patchPattern(p.id, { boardSkip: false }); app.rerender(); } }, '🧩 用拼豆板拼')
+        : hasImg ? h('button.btn.soft', { onclick: async () => { startSetup(p, 'frame'); await store.patchPattern(p.id, { boardSkip: false }); app.rerender(); } }, '🔲 框出拼豆板，生成拼豆板') : null));
   }
 
   if (editing) {
@@ -259,10 +262,21 @@ async function setCell(app, p, board, i, code, where) {
   await store.patchPattern(p.id, pp => {
     const locks = (pp.board.locks || []).filter(([j]) => j !== i);
     locks.push([i, code || '']);
-    return { ...pp, board: { ...pp.board, codes, cells: packCells(board.cells), edits: (pp.board.edits || 0) + 1, locks } };
+    const nb = { ...pp.board, codes, cells: packCells(board.cells), edits: (pp.board.edits || 0) + 1, locks };
+    // 生成的图纸：拼豆板就是清单，改了格子清单跟着变（颗数、多出来的颜色）
+    return { ...pp, board: nb, ...(isGenerated(pp) ? { items: syncedItems(pp.items, nb) } : {}) };
   });
   toast(`${where} 改成 ${code || '空'}`, 'ok');
   app.rerender();
+}
+
+/** 生成的图纸：按拼豆板上的颗数重写清单（顺序按原来的，新出现的颜色加在后面，没有了的去掉） */
+export function syncedItems(items, board) {
+  const cnt = store.boardBeadCounts(board);
+  const out = [];
+  for (const it of items) if (cnt.has(it.code) && !out.some(o => o.code === it.code)) out.push({ ...it, count: cnt.get(it.code) });
+  for (const [code, n] of cnt) if (!out.some(o => o.code === code)) out.push({ code, count: n });
+  return out;
 }
 
 // ---------- 菜单 ----------
@@ -270,12 +284,14 @@ async function setCell(app, p, board, i, code, where) {
 function menu(app, p) {
   const hasImg = p.images?.some(im => im.fullId);
   const hasBoard = !!(p.board && !p.boardSkip); // 选了“不用拼豆板”时没有拼豆板的那些功能
+  // 由图片生成的图纸：拼豆板是算出来的，不用核对、不用和清单对、不用重新框选识别
+  const gen = isGenerated(p);
   if (app.readOnly) {
     // 只能查看：看原图、发到 iPad 看、对一对、镜像、显示方式
     const r = sheet(h('div.menu',
       hasImg ? h('button', { onclick: () => { r.close(); openImageViewer(entriesFromImages(p.images), { view: 'full', focus: false }); } }, '🖼 看原图') : null,
       hasBoard ? h('button', { onclick: () => { r.close(); ipadSheet(app, p, buildItems(p, app.settings)); } }, '📲 在 iPad 上看（扫码）') : null,
-      hasBoard ? h('button', { onclick: () => { r.close(); compareSheet(p); } }, '📊 拼豆板和清单对一对') : null,
+      hasBoard && !gen ? h('button', { onclick: () => { r.close(); compareSheet(p); } }, '📊 拼豆板和清单对一对') : null,
       hasBoard ? h('button', { onclick: () => { r.close(); toggleMirror(app, p); } }, '⇋ 镜像（左右翻转）') : null,
       h('button', { onclick: () => { r.close(); viewSheet(app); } }, '🎨 拼的顺序和显示方式'),
       h('p.small.muted', { style: { padding: '8px 4px 0' } }, readOnlyText(app.readOnly))), { title: '拼豆' });
@@ -285,11 +301,11 @@ function menu(app, p) {
     hasImg ? h('button', { onclick: () => { s.close(); openImageViewer(entriesFromImages(p.images), { view: 'full', focus: false }); } }, '🖼 看原图') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); ipadSheet(app, p, buildItems(p, app.settings)); } }, '📲 在 iPad 上拼（扫码）') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); bs.edit = !bs.edit; bs.editCell = null; app.rerender(); } }, bs.edit ? '✏️ 退出修正模式' : '✏️ 修正格子颜色') : null,
-    hasBoard && hasImg ? h('button', { onclick: () => { s.close(); reviewFlow(app, p); } }, '🔍 核对拼豆板（相近色、没把握的格子）') : null,
-    hasBoard ? h('button', { onclick: () => { s.close(); compareSheet(p); } }, '📊 拼豆板和清单对一对') : null,
+    hasBoard && hasImg && !gen ? h('button', { onclick: () => { s.close(); reviewFlow(app, p); } }, '🔍 核对拼豆板（相近色、没把握的格子）') : null,
+    hasBoard && !gen ? h('button', { onclick: () => { s.close(); compareSheet(p); } }, '📊 拼豆板和清单对一对') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); toggleMirror(app, p); } }, p.board.place?.mirror ? '⇋ 取消镜像' : '⇋ 镜像（左右翻转）') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); startSetup(p, 'peg'); app.rerender(); } }, '📏 换拼豆板尺寸 / 调整位置') : null,
-    hasImg ? h('button', {
+    hasImg && !gen ? h('button', {
       onclick: async () => {
         s.close();
         // 重新框选、重新识别；核对/修正过的格子保留（锁定）

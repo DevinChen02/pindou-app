@@ -15,6 +15,7 @@ import { createPanZoom } from '../panzoom.js';
 import { openImageViewer, entriesFromImages } from '../viewer.js';
 import { loadPixels, gridRegion, drawBoard, boardSize, merged, reviewFlow, reviewCount, placeOf } from './build.js';
 import { goPattern } from './patterns.js';
+import { isGenerated } from './photo.js';
 
 export const DEFAULT_PEGBOARDS = [[52, 52], [78, 78], [104, 104]];
 
@@ -50,6 +51,8 @@ export const fits = (board, W, H) => { const b = beadBox(board); return b.w <= W
 /** 正在（从拼豆页菜单）重新设置这张图纸的拼豆板 */
 export const setupActive = p => st.active && st.pid === p.id;
 const endSetup = () => { st.pid = null; st.active = false; st.pix = null; };
+/** 这张图纸的拼豆板整个换了（重新生成）：没设置完的那一套不要了 */
+export function resetSetup(pid) { if (st.pid === pid) endSetup(); }
 
 /** 从拼豆页进来：从某一步开始（'frame' 重新框选，'peg' 换尺寸/调位置）。redo：框不动也重新识别一遍网格 */
 export function startSetup(p, step = 'frame', redo = false) {
@@ -60,14 +63,18 @@ export function startSetup(p, step = 'frame', redo = false) {
 }
 
 const STEPS = [['frame', '框选'], ['grid', '网格'], ['colors', '颜色'], ['peg', '尺寸'], ['place', '摆放']];
+// 由图片生成的图纸：拼豆板已经是算好的，只要选尺寸、摆位置
+const GEN_STEPS = STEPS.slice(3);
+const stepsOf = p => (isGenerated(p) && p.board ? GEN_STEPS : STEPS);
 
 export async function renderSetup(app, p) {
-  if (st.pid !== p.id) startSetup(p, 'frame');
+  if (st.pid !== p.id) startSetup(p, isGenerated(p) && p.board ? 'peg' : 'frame');
   const view = clear(app.view);
   view.classList.toggle('build-view', st.step === 'place');
   document.body.classList.toggle('mode-board', st.step === 'place');
   app.setTitle(['frame', 'grid', 'colors'].includes(st.step) ? '准备拼豆板' : st.step === 'peg' ? '选拼豆板尺寸' : '摆好位置');
-  const steps = STEPS.map(x => x[0]);
+  const STEPS_P = stepsOf(p);
+  const steps = STEPS_P.map(x => x[0]);
   const back = () => {
     const i = steps.indexOf(st.step);
     // 从拼豆页“换尺寸”进来的，往回退到头就回拼豆页
@@ -82,7 +89,7 @@ export async function renderSetup(app, p) {
     app.rerender();
   };
   app.setBack(back);
-  if (st.step !== 'place') view.append(stepper(st.step));
+  if (st.step !== 'place') view.append(stepper(st.step, STEPS_P));
   if (st.step === 'frame') return frameStep(app, p, view);
   if (st.step === 'grid') return gridStep(app, p, view);
   if (st.step === 'colors') return colorsStep(app, p, view);
@@ -90,9 +97,9 @@ export async function renderSetup(app, p) {
   return placeStep(app, p, view);
 }
 
-function stepper(cur) {
-  const i = STEPS.findIndex(n => n[0] === cur);
-  return h('div.su-steps', STEPS.map(([k, label], j) => h('span' + (j === i ? '.on' : j < i ? '.done' : ''), `${j + 1} ${label}`)));
+function stepper(cur, list = STEPS) {
+  const i = list.findIndex(n => n[0] === cur);
+  return h('div.su-steps', list.map(([k, label], j) => h('span' + (j === i ? '.on' : j < i ? '.done' : ''), `${j + 1} ${label}`)));
 }
 
 /** 每一步底部固定的按钮（不用滑到最下面才找得到“下一步”） */
@@ -601,7 +608,11 @@ async function pegStep(app, p, view) {
         },
       }, '存为常用')),
     h('div.section-title', '或者'),
-    h('button.btn.ghost.block', { onclick: () => { Object.assign(st, { W: board.cols, H: board.rows, ox: 0, oy: 0, native: true, step: 'place' }); app.rerender(); } }, `按图纸原来的格子（${board.rows} 行 × ${board.cols} 列）`));
+    h('button.btn.ghost.block', { onclick: () => { Object.assign(st, { W: board.cols, H: board.rows, ox: 0, oy: 0, native: true, step: 'place' }); app.rerender(); } }, `按图纸原来的格子（${board.rows} 行 × ${board.cols} 列）`),
+    // 生成的图纸第一次设置：没有“框选”那一步，“不用拼豆板”放在这里
+    isGenerated(p) && !p.board?.place ? h('div.center', { style: { marginTop: '12px' } }, h('button.link.small.su-noboard', {
+      onclick: async () => { await store.patchPattern(p.id, { boardSkip: true }); endSetup(); app.rerender(); },
+    }, '不用拼豆板，只按颜色打勾 ›')) : null);
 }
 
 // ---------- ⑤ 摆放：整体上下左右平移 ----------

@@ -4,6 +4,7 @@ import * as store from '../store.js';
 import { itemsSig } from './overview.js';
 import { openImageViewer, entriesFromImages, hasViewable } from '../viewer.js';
 import { tagSheet, goPattern } from './patterns.js';
+import { backToPhoto } from './photo.js';
 
 function sessionItems(s) {
   // 清单色块的颜色跟着存进图纸：生成拼豆板时当这一色在图上的参考色
@@ -21,7 +22,9 @@ export async function renderPreview(app) {
   if (!s) { app.rec.step = 'pick'; return app.render(); }
   const settings = app.settings;
   app.setTitle(s.patternId ? '保存修改' : '保存图纸');
-  app.setBack(() => { app.rec.step = 'verify'; s.mode = 'list'; app.saveSession(); app.render(); });
+  // 生成的图纸：返回到生成那一页（换尺寸、颜色）；识别的：返回核对
+  if (s.method === 'photo') app.setBack(() => backToPhoto(app));
+  else app.setBack(() => { app.rec.step = 'verify'; s.mode = 'list'; app.saveSession(); app.render(); });
   const view = clear(app.view);
   const inv = await store.getInventory();
   const rows = store.previewRows(sessionItems(s), inv, settings);
@@ -36,6 +39,12 @@ export async function renderPreview(app) {
       ? h('div.row.gap', h('div.grow', { style: { minWidth: 0 } }, nameInput), h('button.btn.soft', { onclick: () => openImageViewer(entriesFromImages(s.images), { view: 'full', focus: false }) }, '🖼 看图纸'))
       : nameInput));
 
+  // 由图片生成的：上面放一张小图（点开看图纸和原图）
+  if (s.method === 'photo' && s.images[0]?.thumb) {
+    view.append(h('button.pv-gen', { onclick: () => openImageViewer(entriesFromImages(s.images), { view: 'full', focus: false }) },
+      h('img', { src: s.images[0].thumb, alt: '' }),
+      h('div.grow', h('b', `${s.gen?.cols} × ${s.gen?.rows} 格`), h('div.small.muted', `${fmtNum(totalNeed)} 颗 · ${rows.length} 色 · 由图片生成`), h('div.tiny.muted', '点开看图纸（每格写着色号）和原图'))));
+  }
   if (short.length) {
     const lack = short.reduce((a, r) => a + -r.after, 0);
     view.append(h('div.banner.bad', h('span.ico', '⛔️'), h('div',
@@ -113,7 +122,7 @@ async function ensurePattern(s, status) {
   // 整张图纸原图跟着图纸保存，以后能放大看、生成拼豆板；legend 是清单在原图上的位置（生成拼豆板时避开它）
   const images = s.images.filter(im => im.fullId).map(im => ({
     fullId: im.fullId, fw: im.fw, fh: im.fh, name: im.name || '',
-    legend: im.fullMap ? { x: im.fullMap.ox, y: im.fullMap.oy, w: im.dw * im.fullMap.k, h: im.dh * im.fullMap.k } : null,
+    legend: im.legend || (im.fullMap ? { x: im.fullMap.ox, y: im.fullMap.oy, w: im.dw * im.fullMap.k, h: im.dh * im.fullMap.k } : null),
   }));
   // 总览时已经数字化过、清单后来又没变：拼豆板直接存上
   const board = s.boardPre && s.boardPre.sig === itemsSig(items) ? s.boardPre.board : null;
@@ -122,6 +131,8 @@ async function ensurePattern(s, status) {
     statedTotal: s.statedTotal || null, thumbs: t.images,
     images, imageIds: images.map(im => im.fullId),
     ...(board ? { board } : {}),
+    // 由普通图片生成的：记下原图和生成时的选项（以后可以“重新生成”）
+    ...(s.gen ? { gen: s.gen } : {}),
   });
   s.patternId = id;
   return id;
