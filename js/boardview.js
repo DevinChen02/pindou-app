@@ -288,12 +288,12 @@ export function boardStage({ board, place, sel, done, show, spot, onMirror, onSp
   const info = h('div.bd-info', { hidden: true });
   let pz = null;
   const zoomBar = h('div.bd-zoom',
-    h('button.wide.bd-mirror' + (place.mirror ? '.on' : ''), { 'aria-label': '镜像', 'aria-pressed': String(!!place.mirror), onclick: onMirror }, '⇋', h('span.t', ' 镜像')),
+    // 镜像着的时候按钮自己变色、写“镜像中”（不另外在板上贴标签：小屏上会压住按钮和豆子）
+    h('button.wide.bd-mirror' + (place.mirror ? '.on' : ''), { 'aria-label': place.mirror ? '镜像中（点一下取消）' : '镜像', 'aria-pressed': String(!!place.mirror), onclick: onMirror }, '⇋', h('span.t', place.mirror ? ' 镜像中' : ' 镜像')),
     h('button.wide.bd-spot' + (spot ? '.on' : ''), { 'aria-label': '高亮当前颜色', 'aria-pressed': String(spot), onclick: onSpot }, '✦', h('span.t', ' 高亮')),
     h('button', { 'aria-label': '缩小', onclick: () => pz.zoomBy(1 / 1.6) }, '−'),
     h('button.wide', { onclick: () => pz.fit() }, '适合'),
     h('button', { 'aria-label': '放大', onclick: () => pz.zoomBy(1.6) }, '＋'));
-  if (place.mirror) stage.append(h('div.bd-mirror-tag', '镜像中（左右翻转）'));
   // 放大后行号、列号固定在左边、上边
   const rulers = makeRulers(stage, place);
   stage.append(layer, ...rulers.els, info, zoomBar, ...extra);
@@ -415,7 +415,7 @@ export function selBar({ it, boardCount, isDone, hasBoard, show, spot, onToggle,
     h('div.grow',
       h('b', `${it.code} · ${fmtNum(it.count)} 颗`, it.listCount != null && it.listCount !== it.count ? h('span.tiny.muted', `（清单 ${fmtNum(it.listCount)}）`) : null),
       hasBoard ? h('div.tiny.muted', (boardCount === it.count ? '' : `板上 ${boardCount} · `) + (spot ? `亮的 = 正在拼，暗的 = 已拼好，${show === 'real' ? '没拼的先不画' : '最暗 = 还没拼'}` : show === 'real' ? '浅色 = 已拼好，没拼的先不画' : '浅色 = 已拼好，最淡 = 还没拼')) : null),
-    readOnly ? (isDone ? h('span.small.muted', '✓ 已拼好') : null) : h('button.btn' + (isDone ? '.ghost' : '.ok'), { onclick: onToggle }, isDone ? '↺ 还没拼好' : '✓ 这个颜色拼好了'));
+    readOnly ? (isDone ? h('span.small.muted', '✓ 已拼好') : null) : h('button.btn' + (isDone ? '.ghost' : '.ok'), { onclick: onToggle }, isDone ? '↺ 还没拼好' : h('span', '✓ ', h('span.t', '这个颜色'), '拼好了')));   // 包一层：按钮是 flex，几段字之间会有空隙
 }
 
 /** 拼豆板上每种颜色的格子数 */

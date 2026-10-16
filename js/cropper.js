@@ -14,8 +14,32 @@ const OVER = 0.35;      // 放大后图片边缘最多可以挪到视窗里多�
 const MARGIN = 20;      // fill 模式：图片四周留的空（角不贴着屏幕边）
 
 /**
+ * 框选器最高能多高：页面一打开就能看到整块（四个角、四条边都不被顶栏、吸底按钮、底栏、iPhone 底部小横条挡住）；
+ * 上面说明字太多、屏幕太矮放不下时，退一步：滚到合适的位置能整块看到（按在框选器上是拖框，页面滚不动，被挡的地方就永远够不着了）
+ */
+function roomFor(wrap) {
+  const vh = innerHeight;
+  const topbar = document.getElementById('topbar');
+  const top = topbar && topbar.offsetHeight ? topbar.getBoundingClientRect().bottom : 0;
+  const probe = h('div', { style: { position: 'fixed', height: 'var(--safe-b)', visibility: 'hidden', pointerEvents: 'none' } });
+  document.body.append(probe);
+  let bottom = probe.offsetHeight;
+  probe.remove();
+  for (const el of document.querySelectorAll('#tabbar, .sticky-actions')) {
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || !el.offsetHeight) continue;
+    bottom = Math.max(bottom, cs.position === 'fixed' ? vh - el.getBoundingClientRect().top : (parseFloat(cs.bottom) || 0) + el.offsetHeight);
+  }
+  const docTop = wrap.getBoundingClientRect().top + scrollY;
+  const first = vh - bottom - docTop - 10;   // 不用滚
+  const most = vh - bottom - top - 16;       // 滚一下
+  return Math.max(160, first >= vh * 0.38 ? first : most);
+}
+
+/**
  * 可拖动的框选器。work.rect 为原图坐标；返回 { el, tools, get() }
  * fill：视窗占满宽度（高度最多 maxVh），图片四周留空；否则视窗和图片一样大（宽度不超过 100%、高度不超过 maxVh）
+ * 两种都不会高过 roomFor()：整块能完整看到
  * tools：缩放按钮（－ ＋），调用的页面放在合适的地方
  */
 export function cropper(work, { maxVh = 62, fill = false } = {}) {
@@ -67,9 +91,12 @@ export function cropper(work, { maxVh = 62, fill = false } = {}) {
   };
   const layout = () => {
     if (!wrap.isConnected || !wrap.clientWidth) return;
+    const maxH = Math.min(innerHeight * maxVh / 100, roomFor(wrap));
     if (fill) {
       const w0 = wrap.clientWidth;
-      wrap.style.height = Math.round(Math.min(innerHeight * maxVh / 100, (w0 - 2 * M) * IH / IW + 2 * M)) + 'px';
+      wrap.style.height = Math.round(Math.min(maxH, (w0 - 2 * M) * IH / IW + 2 * M)) + 'px';
+    } else {
+      wrap.style.width = `min(100%, ${Math.floor(maxH * c.w / c.h)}px)`;   // 下面读 clientWidth 时就按新宽度排好了
     }
     const rel = fitS ? view.s / fitS : 1;
     W = wrap.clientWidth; H = wrap.clientHeight;

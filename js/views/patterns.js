@@ -562,7 +562,7 @@ async function renderTotals(app) {
 
   view.append(h('div.totals', { style: { marginTop: '12px' } },
     h('div.stat', h('div.k', '一共需要'), h('div.v', fmtNum(totalNeed)), h('div.s.muted', `${rows.length} 种颜色`)),
-    h('div.stat', h('div.k', '建议买'), h('div.v', { style: { color: totalBuy ? 'var(--bad)' : 'var(--ok)' } }, fmtNum(totalBuy)),
+    h('div.stat', h('div.k', '建议买'), h('div.v', { style: { color: totalBuy ? 'var(--bad-text)' : 'var(--ok-text)' } }, fmtNum(totalBuy)),
       h('div.s.muted', totalBuy ? `${short.length + low.length} 种颜色` : '都不用买'))));
 
   if (short.length) {

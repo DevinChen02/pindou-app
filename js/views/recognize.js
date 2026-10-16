@@ -217,9 +217,9 @@ async function renderMerge(app) {
     view.append(
       h('div.banner.ok', h('span.ico', '✓'), h('div', h('b', `${n} 张拼成了一张`), h('div.small', `找到了每张之间重叠的地方，重叠部分只留一份（${g.canvas.width}×${g.canvas.height}）。点图可以放大看接缝对不对。`))),
       mergePreview(g.canvas, '拼好的图'),
-      h('div.sticky-actions',
-        h('button.btn.primary.big.block.mg-use', { onclick: () => useCanvas(g.canvas, `已拼成一张大图（${n} 张）`) }, '拼对了，用这张大图继续'),
-        h('button.btn.ghost.block.mg-manual', { onclick: () => { M.manual = true; M.pieces = 'originals'; M.order = r.works.map((_, i) => i); app.rerender(); } }, '不对，手动排')),
+      h('div.sticky-actions', h('div.pair',
+        h('button.btn.big.mg-manual', { onclick: () => { M.manual = true; M.pieces = 'originals'; M.order = r.works.map((_, i) => i); app.rerender(); } }, '不对，手动排'),
+        h('button.btn.primary.big.mg-use', { onclick: () => useCanvas(g.canvas, `已拼成一张大图（${n} 张）`) }, '拼对了，继续'))),
       separately);
     return;
   }
@@ -245,9 +245,9 @@ async function renderMerge(app) {
       h('button.btn.sm.soft', { 'aria-label': '往后', disabled: pos === nb - 1, onclick: () => move(pos, 1) }, perRow === 1 ? '↓' : '→')))),
     h('div.section-title', '拼出来是这样'),
     mergePreview(merged, '拼好的图'),
-    h('div.sticky-actions',
-      h('button.btn.primary.big.block.mg-use', { onclick: () => useCanvas(merged, `已拼成一张大图（${n} 张）`) }, '用这张大图继续'),
-      M.pieces === 'originals' ? h('button.btn.ghost.block', { onclick: () => { M.manual = M.groups.length > 1; M.pieces = null; M.order = M.groups.map((_, i) => i); app.rerender(); } }, '回到自动拼的结果') : null),
+    h('div.sticky-actions', h('div.pair',
+      M.pieces === 'originals' ? h('button.btn.big.mg-auto', { onclick: () => { M.manual = M.groups.length > 1; M.pieces = null; M.order = M.groups.map((_, i) => i); app.rerender(); } }, '回到自动拼的') : null,
+      h('button.btn.primary.big.mg-use', { onclick: () => useCanvas(merged, `已拼成一张大图（${n} 张）`) }, '用这张大图继续'))),
     separately);
 }
 

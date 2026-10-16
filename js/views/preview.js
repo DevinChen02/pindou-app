@@ -31,6 +31,8 @@ export async function renderPreview(app) {
   const short = rows.filter(r => r.status === 'short');
   const low = rows.filter(r => r.status === 'low');
   const totalNeed = rows.reduce((a, r) => a + r.need, 0);
+  // 补货清单放在提示里（不占吸底按钮的位置）
+  const copyBtn = () => h('button.btn.sm.soft.pv-copy', { onclick: () => copyText(shoppingList(short, low)) }, '📋 复制补货清单');
 
   const nameInput = h('input.input', { value: s.name || '', placeholder: '给这幅图起个名字' });
   nameInput.addEventListener('input', () => { s.name = nameInput.value; app.saveSession(); });
@@ -49,10 +51,10 @@ export async function renderPreview(app) {
     const lack = short.reduce((a, r) => a + -r.after, 0);
     view.append(h('div.banner.bad', h('span.ico', '⛔️'), h('div',
       h('b', `${short.length} 种颜色不够，共缺 ${fmtNum(lack)} 颗`),
-      h('div.small', '可以先存到图纸库，补货后再拼；也可以先拼够的颜色。'))));
+      h('div.small', '可以先存到图纸库，补货后再拼；也可以先拼够的颜色。'), copyBtn())));
   } else if (low.length) {
     view.append(h('div.banner.warn', h('span.ico', '⚠️'), h('div',
-      h('b', '全部够用'), h('div.small', `但拼完后有 ${low.length} 种颜色会低于补货线。`))));
+      h('b', '全部够用'), h('div.small', `但拼完后有 ${low.length} 种颜色会低于补货线。`), copyBtn())));
   } else {
     view.append(h('div.banner.ok', h('span.ico', '✅'), h('div', h('b', '全部够用'), h('div.small', '拼完后所有颜色都还在补货线以上。'))));
   }
@@ -92,12 +94,13 @@ export async function renderPreview(app) {
     } catch (e) { toast(e.message, 'error'); }
   };
 
+  // 吸底只放一排按钮（小屏上也不挡住上面的清单）：次要的在左，主要的在右
   view.append(h('div.sticky-actions',
     s.patternId
       ? h('button.btn.primary.big.block', { onclick: () => save(false) }, '保存修改')
-      : [h('button.btn.primary.big.block', { onclick: () => save(true) }, '保存并开始拼豆'),
-        h('button.btn.big.block', { onclick: () => save(false) }, '先存到图纸库'),
-        (short.length || low.length) ? h('button.btn.ghost.block', { onclick: () => copyText(shoppingList(short, low)) }, '复制补货清单') : null]));
+      : h('div.pair',
+        h('button.btn.big.pv-save', { onclick: () => save(false) }, '先存到图纸库'),
+        h('button.btn.primary.big.pv-start', { onclick: () => save(true) }, '保存并开始拼豆'))));
 }
 
 function shoppingList(short, low) {

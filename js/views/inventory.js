@@ -125,7 +125,7 @@ async function editSheet(app, code) {
     h('div.section-title', '补货（加上）'),
     h('div.quick', settings.restockPresets.map(n => h('button.btn.soft', { onclick: () => apply([{ code, delta: n }], 'restock', '') }, `+${n}`))),
     h('div.section-title', '自定义数量'),
-    h('div.row.gap', amount,
+    h('div.inv-amt', amount,
       h('button.btn', { onclick: () => { const n = Math.round(+amount.value); if (n > 0) apply([{ code, delta: n }], 'restock', ''); else toast('请输入数量'); } }, '加上'),
       h('button.btn', { onclick: () => { const n = Math.round(+amount.value); if (n >= 0 && amount.value !== '') apply([{ code, delta: -n }], 'adjust', '手动减少'); else toast('请输入数量'); } }, '减去'),
       h('button.btn', { onclick: () => { if (amount.value === '') return toast('请输入数量'); apply([{ code, set: Math.round(+amount.value) }], 'adjust', '盘点设为'); } }, '设为')),
@@ -140,7 +140,7 @@ async function editSheet(app, code) {
     txs.length ? [h('div.section-title', '最近变动'), h('div.list', txs.map(t => {
       const d = t.deltas.find(x => x.code === code);
       return h('div.li', h('div.grow', h('div.small', store.TX_TYPES[t.type] || t.type, t.undone ? h('span.tag', { style: { marginLeft: '6px' } }, '已撤销') : null), h('div.tiny.muted', fmtTime(t.time))),
-        h('b.mono', { style: { color: d.delta < 0 ? 'var(--bad)' : 'var(--ok)' } }, (d.delta > 0 ? '+' : '') + d.delta), h('span.tiny.muted', `→ ${d.after}`));
+        h('b.mono', { style: { color: d.delta < 0 ? 'var(--bad-text)' : 'var(--ok-text)' } }, (d.delta > 0 ? '+' : '') + d.delta), h('span.tiny.muted', `→ ${d.after}`));
     }))] : null,
   ], { title: `${code} 库存` });
 }
@@ -270,7 +270,7 @@ async function transactions(app, view) {
       h('div.grow',
         h('div', h('b', store.TX_TYPES[t.type] || t.type), pname ? ` · ${pname}` : '', t.note ? ` · ${t.note}` : '', t.undone ? h('span.tag', { style: { marginLeft: '6px' } }, '已撤销') : null),
         h('div.tiny.muted', `${fmtTime(t.time)} · ${t.deltas.length} 色`)),
-      h('b.mono', { style: { color: sum < 0 ? 'var(--bad)' : 'var(--ok)' } }, (sum > 0 ? '+' : '') + fmtNum(sum)),
+      h('b.mono', { style: { color: sum < 0 ? 'var(--bad-text)' : 'var(--ok-text)' } }, (sum > 0 ? '+' : '') + fmtNum(sum)),
       h('div', { style: { flexBasis: '100%' } }, deltas)));
   }
   view.append(box, h('p.small.muted.center', '点一条记录可以看每个颜色的变化。拼豆扣减可以在图纸详情里撤销。'));
