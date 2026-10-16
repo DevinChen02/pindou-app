@@ -34,10 +34,16 @@ function defaults(settings, native) {
     size: native ? 'native' : (SIZES.includes(d.size) || (d.size >= 4 && d.size <= LONG_MAX) ? d.size : 50),
     maxColors: native ? 0 : (COLOR_LIMITS.includes(d.maxColors) ? d.maxColors : 16),
     set: ['normal', 'all', 'stock'].includes(d.set) ? d.set : 'normal',
-    bg: true, dither: native ? false : !!d.dither, clean: native ? false : d.clean !== false,
+    bg: true, dither: native ? false : !!d.dither,
+    // 保留线条（轮廓线连成一条、保持原来的颜色）、细节多少（精细 / 适中 / 简洁）
+    lines: d.lines !== false, detail: detailOf(d),
     exclude: [], replace: [],
   };
 }
+
+const DETAILS = [['simple', '简洁'], ['mid', '适中'], ['fine', '精细']];
+/** 细节多少（旧版本存的“去掉零星杂点”开关：关 = 精细，开 = 适中） */
+const detailOf = o => (DETAILS.some(([k]) => k === o?.detail) ? o.detail : o?.clean === false ? 'fine' : 'mid');
 
 /** 一张图的状态（在 app.rec.photo 里，只在内存里） */
 async function newState(canvas, name) {
@@ -98,7 +104,8 @@ async function stateFromGen(gen) {
   const st = await newState(canvas, name);
   st.srcId = gen.srcId;
   if (gen.userRect) st.rect = { ...gen.userRect };
-  st.opts = { ...defaults({}, false), ...gen.opts, exclude: [...(gen.opts?.exclude || [])], replace: (gen.opts?.replace || []).map(x => [...x]) };
+  st.opts = { ...defaults({}, false), ...gen.opts, detail: detailOf(gen.opts), lines: gen.opts?.lines !== false, exclude: [...(gen.opts?.exclude || [])], replace: (gen.opts?.replace || []).map(x => [...x]) };
+  delete st.opts.clean;
   return st;
 }
 
@@ -208,7 +215,10 @@ function prepared(st, L) {
 function ensureResult(app, st, inv) {
   const L = layoutOf(st), o = st.opts;
   const codes = codesFor(o.set, inv).filter(c => !o.exclude.includes(c));
-  const key = JSON.stringify([L.rect, L.cols, L.rows, L.inner, L.via || null, codes, o.maxColors, o.bg, o.dither, o.clean, o.replace]);
+  // 像素画（原图像素、从原来的像素格缩放）一格就是一个像素：不找线条、不抹细节
+  const pixel = L.native || !!L.via;
+  const lines = !pixel && o.lines, detail = pixel ? 'fine' : o.detail;
+  const key = JSON.stringify([L.rect, L.cols, L.rows, L.inner, L.via || null, codes, o.maxColors, o.bg, o.dither, lines, detail, o.replace]);
   if (st.result?.key === key) return { ready: true };
   if (st.want === key) return { ready: false };
   st.want = key;
@@ -218,7 +228,7 @@ function ensureResult(app, st, inv) {
     return { ready: true };
   }
   const P = prepared(st, L);
-  const args = { rect: P.rect, cols: L.cols, rows: L.rows, inner: L.inner, via: L.via || null, pal: codes.map(c => [c, ...rgbOf(c)]), maxColors: o.maxColors, bg: o.bg, dither: o.dither, clean: o.clean, replace: o.replace };
+  const args = { rect: P.rect, cols: L.cols, rows: L.rows, inner: L.inner, via: L.via || null, pal: codes.map(c => [c, ...rgbOf(c)]), maxColors: o.maxColors, bg: o.bg, dither: o.dither, lines, detail, replace: o.replace };
   runBoard('photo', P.img, args).then(res => {
     if (st.want !== key) return;
     st.want = null;
@@ -337,9 +347,17 @@ async function genPage(app, st) {
   const toggles = [];
   if (st.transparent) toggles.push(h('div.kv.pg-transp', h('div.grow', h('div.k', '透明的地方不放豆子'), h('div.d', '这张图有透明背景'))));
   if (R?.bgFound || (R && R.bgRemoved)) toggles.push(sw('pg-bg', o.bg, '去掉背景', `四周的${bgName(R.bgRgb)}背景不放豆子${o.bg && R.bgRemoved ? `（省 ${fmtNum(R.bgRemoved)} 颗）` : ''}`, v => ({ bg: v })));
-  toggles.push(sw('pg-clean', o.clean && !o.dither, '去掉零星杂点', '单独一颗、和周围差不多的杂色换成周围的颜色，好拼一些', v => ({ clean: v, ...(v ? { dither: false } : {}) })));
-  toggles.push(sw('pg-dither', o.dither, '抖动（颜色过渡更自然）', '用几种颜色的豆子掺着拼出中间色，适合照片；豆子会更零散', v => ({ dither: v, ...(v ? { clean: false } : {}) })));
-  view.append(h('div.section-title', '细节'), h('div.card.pg-opts', toggles));
+  const pixel = L.native || !!L.via;
+  if (pixel) {
+    toggles.push(h('div.kv.pg-pixnote', h('div.grow', h('div.k', '按原来的像素'), h('div.d', '像素画一格就是一个像素：不找线条、不抹细节，颜色原样。'))));
+  } else {
+    toggles.push(sw('pg-lines', o.lines, '保留线条', `轮廓线、描边接成一条，保持线条原来的颜色，不会被缩没、断成点${o.lines && R?.lineCells ? ` · ${fmtNum(R.lineCells)} 格是线条` : ''}`, v => ({ lines: v })));
+    toggles.push(h('div.kv.pg-detail', h('div.grow', h('div.k', '细节'),
+      h('div.d', o.detail === 'simple' ? '简洁：小块的颜色、细碎的明暗都并到周围，色块大、好拼' : o.detail === 'fine' ? '精细：原样保留每个小细节（照片会比较碎）' : '适中：细碎的杂色、纹理并到周围，眼睛这类和周围差得多的小细节留着')),
+      h('div.seg.pg-detail-seg', DETAILS.map(([k, label]) => h('button' + (o.detail === k ? '.on' : ''), { 'data-detail': k, onclick: () => setOpt(app, st, { detail: k }) }, label)))));
+    toggles.push(sw('pg-dither', o.dither, '抖动（颜色过渡更自然）', '用几种颜色的豆子掺着拼出中间色，适合照片；豆子会更零散（打开时不并小块）', v => ({ dither: v })));
+  }
+  view.append(h('div.section-title', '线条和细节'), h('div.card.pg-opts', toggles));
 
   // 用到的颜色（点一下可以换掉）
   if (R && !R.error) view.append(colorsCard(app, st, R, inv));
@@ -465,11 +483,11 @@ async function finish(app, st) {
     const o = st.opts;
     const gen = {
       v: 1, srcId: st.srcId, rect: R.L.rect, userRect: { ...st.rect }, cols, rows, native: !!R.L.native,
-      opts: { size: o.size, maxColors: o.maxColors, set: o.set, bg: o.bg, dither: o.dither, clean: o.clean, exclude: [...o.exclude], replace: o.replace.map(x => [...x]) },
+      opts: { size: o.size, maxColors: o.maxColors, set: o.set, bg: o.bg, dither: o.dither, lines: o.lines, detail: o.detail, exclude: [...o.exclude], replace: o.replace.map(x => [...x]) },
       at: Date.now(),
     };
     // 下次默认用这次的选项（像素画的“原图像素”不算）
-    app.settings.photoGen = { size: o.size === 'native' ? (app.settings.photoGen?.size || 50) : o.size, maxColors: R.L.native ? (app.settings.photoGen?.maxColors ?? 16) : o.maxColors, set: o.set, dither: o.dither, clean: o.clean };
+    app.settings.photoGen = { size: o.size === 'native' ? (app.settings.photoGen?.size || 50) : o.size, maxColors: R.L.native ? (app.settings.photoGen?.maxColors ?? 16) : o.maxColors, set: o.set, dither: o.dither, lines: o.lines, detail: o.detail };
     await store.saveSettings(app.settings);
     const items = codes.map((code, k) => ({ id: newId(), img: null, code, rawCode: code, count: counts[k], box: null, rgb: null, uncertain: false, verified: true, orig: { code, count: counts[k] } }));
     if (st.pid) return saveRegenerated(app, st, { board, images, items, gen });

@@ -65,10 +65,10 @@ export function startSetup(p, step = 'frame', redo = false) {
 const STEPS = [['frame', '框选'], ['grid', '网格'], ['colors', '颜色'], ['peg', '尺寸'], ['place', '摆放']];
 // 由图片生成的图纸：拼豆板已经是算好的，只要选尺寸、摆位置
 const GEN_STEPS = STEPS.slice(3);
-const stepsOf = p => (isGenerated(p) && p.board ? GEN_STEPS : STEPS);
+const stepsOf = p => (isGenerated(p) ? GEN_STEPS : STEPS);
 
 export async function renderSetup(app, p) {
-  if (st.pid !== p.id) startSetup(p, isGenerated(p) && p.board ? 'peg' : 'frame');
+  if (st.pid !== p.id || (isGenerated(p) && !['peg', 'place'].includes(st.step))) startSetup(p, isGenerated(p) ? 'peg' : 'frame');
   const view = clear(app.view);
   view.classList.toggle('build-view', st.step === 'place');
   document.body.classList.toggle('mode-board', st.step === 'place');
@@ -583,7 +583,8 @@ async function pegStep(app, p, view) {
   const savePresets = async list => { settings.pegboards = list; await store.saveSettings(settings); app.rerender(); };
   view.append(h('div.card.su-sum',
     h('div.row.between', h('span.small.muted', '这幅图有豆子的范围'), h('b', `${b.h} 行 × ${b.w} 列`)),
-    h('div.tiny.muted', { style: { marginTop: '4px' } }, '拼豆板至少要这么大，放不下整幅图的尺寸不能选。')));
+    h('div.tiny.muted', { style: { marginTop: '4px' } }, '拼豆板至少要这么大，放不下整幅图的尺寸不能选。'),
+    isGenerated(p) ? h('div.tiny.muted.su-gen-note', { style: { marginTop: '4px' } }, '🎨 这块拼豆板就是生成图纸时直接算出来的，每一格的色号都是定的，不用识别、不用核对。') : null));
   view.append(h('div.section-title', '常用尺寸'));
   view.append(h('div.su-pegs', presets.map(([w, hh], i) => {
     const ok = fits(board, w, hh);

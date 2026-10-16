@@ -9,22 +9,34 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
  *   onChange(state)     每次缩放/平移后
  *   maxFit=10, maxAbs=4 最大放大：适合的 10 倍，或内容 1 像素放到 4 个屏幕点，取大的
  *   doubleTap=3         双击放大到“适合”的几倍
+ *   inset()             叠在画面上的按钮占掉的边（{ top, right, bottom, left }，屏幕像素）：
+ *                       “适合”时内容放在让开它们的地方，拖动时内容的边也能拖到它们外面（不会被按钮永远挡住）
  */
-export function createPanZoom(stage, layer, { onTap = null, onChange = null, maxFit = 10, maxAbs = 4, doubleTap = 3 } = {}) {
+export function createPanZoom(stage, layer, { onTap = null, onChange = null, maxFit = 10, maxAbs = 4, doubleTap = 3, inset = null } = {}) {
   const st = { s: 1, tx: 0, ty: 0, w: 1, h: 1, fit: 1, min: 0.1, max: 4, ready: false };
   const size = () => ({ sw: stage.clientWidth || window.innerWidth, sh: stage.clientHeight || window.innerHeight });
+  /** 能看清内容的区域（让开叠在上面的按钮） */
+  const area = () => {
+    const { sw, sh } = size();
+    const n = (typeof inset === 'function' ? inset() : inset) || {};
+    const t = Math.max(0, n.top || 0), r = Math.max(0, n.right || 0), b = Math.max(0, n.bottom || 0), l = Math.max(0, n.left || 0);
+    // 按钮占得太多（比如屏幕很矮）就不让了
+    if (sw - l - r < sw * 0.5 || sh - t - b < sh * 0.5) return { sw, sh, x0: 0, y0: 0, x1: sw, y1: sh };
+    return { sw, sh, x0: l, y0: t, x1: sw - r, y1: sh - b };
+  };
   function apply() {
     layer.style.transform = `translate(${st.tx}px, ${st.ty}px) scale(${st.s})`;
     onChange?.(st);
   }
   function clampT() {
-    const { sw, sh } = size();
-    const iw = st.w * st.s, ih = st.h * st.s;
-    st.tx = iw <= sw ? (sw - iw) / 2 : clamp(st.tx, sw - iw, 0);
-    st.ty = ih <= sh ? (sh - ih) / 2 : clamp(st.ty, sh - ih, 0);
+    const a = area();
+    const iw = st.w * st.s, ih = st.h * st.s, aw = a.x1 - a.x0, ah = a.y1 - a.y0;
+    st.tx = iw <= aw ? a.x0 + (aw - iw) / 2 : clamp(st.tx, a.x1 - iw, a.x0);
+    st.ty = ih <= ah ? a.y0 + (ah - ih) / 2 : clamp(st.ty, a.y1 - ih, a.y0);
   }
   function setLimits() {
-    const { sw, sh } = size();
+    const a = area();
+    const sw = a.x1 - a.x0, sh = a.y1 - a.y0;
     st.fit = Math.min(sw / st.w, sh / st.h);
     st.min = Math.min(st.fit, 1);
     st.max = Math.max(st.fit * maxFit, maxAbs);
@@ -44,16 +56,16 @@ export function createPanZoom(stage, layer, { onTap = null, onChange = null, max
       if (r) { st.s = clamp(st.fit * r, st.min, st.max); clampT(); apply(); } else api.fit();
     },
     fit() { setLimits(); st.s = st.fit; clampT(); apply(); },
-    zoomBy(f) { const { sw, sh } = size(); zoomAt(st.s * f, sw / 2, sh / 2); },
+    zoomBy(f) { const a = area(); zoomAt(st.s * f, (a.x0 + a.x1) / 2, (a.y0 + a.y1) / 2); },
     zoomAt,
     /** 把内容里的一个矩形放到屏幕中间（最多放大到适合的 maxF 倍） */
     focusRect(b, { wFrac = 0.5, hFrac = 0.3, maxF = 6 } = {}) {
-      const { sw, sh } = size();
+      const a = area(), sw = a.x1 - a.x0, sh = a.y1 - a.y0;
       const bw = Math.max(b.x1 - b.x0, 8), bh = Math.max(b.y1 - b.y0, 8);
       const ns = clamp(Math.min(sw * wFrac / bw, sh * hFrac / bh, st.fit * maxF), st.fit, st.max);
       st.s = ns;
-      st.tx = sw / 2 - (b.x0 + b.x1) / 2 * ns;
-      st.ty = sh / 2 - (b.y0 + b.y1) / 2 * ns;
+      st.tx = a.x0 + sw / 2 - (b.x0 + b.x1) / 2 * ns;
+      st.ty = a.y0 + sh / 2 - (b.y0 + b.y1) / 2 * ns;
       clampT(); apply();
     },
     /** 屏幕坐标 → 内容坐标 */

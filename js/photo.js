@@ -181,19 +181,49 @@ export function hasTransparency(img) {
 
 /**
  * 每格的颜色：格子里（像素画只看每格中间一半）的像素取各通道中位数，再把和中位色差不多的像素平均。
- * 返回 { rgb: Float32Array(N×3), alpha: Float32Array(N) }（alpha = 不透明像素的比例）
+ * mask（可选，和 img 一样大）：线条上的像素。给了的话每格分开算：线条像素占多少（lineFrac）、线条的颜色（lineRgb），
+ * 底色还是用所有像素的代表色（中位数附近，线条只占一小部分时不会被拉暗）。
+ * 返回 { rgb: Float32Array(N×3), alpha: Float32Array(N), lineFrac?, lineRgb? }（alpha = 不透明像素的比例）
  */
-export function sampleCells(img, rect, cols, rows, { inner = false, lines = !inner } = {}) {
+export function sampleCells(img, rect, cols, rows, { inner = false, mask = null } = {}) {
   const { data: d, width: W, height: H } = img;
   const N = cols * rows;
   const rgb = new Float32Array(N * 3), alpha = new Float32Array(N);
+  const lineFrac = mask ? new Float32Array(N) : null, lineRgb = mask ? new Float32Array(N * 3) : null;
   const fx = rect.w / cols, fy = rect.h / rows, sh = inner ? 0.25 : 0;
   const MAXS = 1600;
-  const R = new Uint8Array(MAXS), G = new Uint8Array(MAXS), B = new Uint8Array(MAXS), DK = new Uint16Array(MAXS);
+  const R = new Uint8Array(MAXS), G = new Uint8Array(MAXS), B = new Uint8Array(MAXS);
+  const LR = new Uint8Array(MAXS), LG = new Uint8Array(MAXS), LB = new Uint8Array(MAXS);
   const span = (a, b, n) => {
     let i0 = Math.ceil(a - 0.5), i1 = Math.ceil(b - 0.5) - 1;
     if (i1 < i0) i0 = i1 = Math.floor((a + b) / 2);
     return [Math.max(0, Math.min(n - 1, i0)), Math.max(0, Math.min(n - 1, i1))];
+  };
+  /** 一堆像素的代表色：各通道中位数附近的平均；中位数拼出了一个没有的颜色时取“最有代表性”的那个像素 */
+  const typical = (R, G, B, n) => {
+    const mr = R.slice(0, n).sort()[n >> 1], mg = G.slice(0, n).sort()[n >> 1], mb = B.slice(0, n).sort()[n >> 1];
+    const near = (r0, g0, b0) => {
+      let sr = 0, sgc = 0, sb = 0, k = 0;
+      for (let j = 0; j < n; j++) {
+        if (Math.max(Math.abs(R[j] - r0), Math.abs(G[j] - g0), Math.abs(B[j] - b0)) > 40) continue;
+        sr += R[j]; sgc += G[j]; sb += B[j]; k++;
+      }
+      return k ? [sr / k, sgc / k, sb / k, k] : null;
+    };
+    let m = near(mr, mg, mb);
+    if (!m || m[3] < n * 0.3) {
+      // 各通道的中位数拼出了一个格子里没有的颜色（两种颜色差不多各占一半时，比如红 + 蓝 → 紫）：
+      // 改取“离其他像素最近”的那个像素的颜色（中心点），只在格子里本来就有的颜色里选
+      const step = Math.max(1, Math.floor(n / 64));
+      let bj = 0, bv = Infinity;
+      for (let a = 0; a < n; a += step) {
+        let t = 0;
+        for (let c2 = 0; c2 < n; c2 += step) t += Math.max(Math.abs(R[a] - R[c2]), Math.abs(G[a] - G[c2]), Math.abs(B[a] - B[c2]));
+        if (t < bv) { bv = t; bj = a; }
+      }
+      m = near(R[bj], G[bj], B[bj]) || [R[bj], G[bj], B[bj]];
+    }
+    return m;
   };
   for (let r = 0; r < rows; r++) {
     const [y0, y1] = span(rect.y + (r + sh) * fy, rect.y + (r + 1 - sh) * fy, H);
@@ -201,57 +231,251 @@ export function sampleCells(img, rect, cols, rows, { inner = false, lines = !inn
     for (let c = 0; c < cols; c++) {
       const [x0, x1] = span(rect.x + (c + sh) * fx, rect.x + (c + 1 - sh) * fx, W);
       const stX = Math.max(1, Math.round((x1 - x0 + 1) / 16));
-      let n = 0, all = 0;
+      let n = 0, nl = 0, all = 0;
       for (let y = y0; y <= y1; y += stY) {
         for (let x = x0; x <= x1; x += stX) {
           all++;
           const q = (y * W + x) * 4;
-          if (d[q + 3] < OPA || n >= MAXS) continue;
-          R[n] = d[q]; G[n] = d[q + 1]; B[n] = d[q + 2]; n++;
+          if (d[q + 3] < OPA || n + nl >= MAXS) continue;
+          if (mask && mask[y * W + x]) { LR[nl] = d[q]; LG[nl] = d[q + 1]; LB[nl] = d[q + 2]; nl++; }
+          else { R[n] = d[q]; G[n] = d[q + 1]; B[n] = d[q + 2]; n++; }
         }
       }
       const i = r * cols + c;
-      alpha[i] = all ? n / all : 0;
-      if (!n) continue;
-      let mr = R.slice(0, n).sort()[n >> 1], mg = G.slice(0, n).sort()[n >> 1], mb = B.slice(0, n).sort()[n >> 1];
-      // 细的深色线条（插画的黑边）只占格子的三四成也留下来：不然线条会断成一点一点的
-      if (lines && n >= 9) {
-        const lum = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b, ml = lum(mr, mg, mb);
-        let nd = 0;
-        for (let j = 0; j < n; j++) if (lum(R[j], G[j], B[j]) < ml - 60) DK[nd++] = j;
-        if (nd >= n * 0.3 && nd < n * 0.5) {
-          const pick = (A) => { const t = new Uint8Array(nd); for (let q = 0; q < nd; q++) t[q] = A[DK[q]]; return t.sort()[nd >> 1]; };
-          const dr = pick(R), dg = pick(G), db = pick(B);
-          let tight = 0;
-          for (let q = 0; q < nd; q++) { const j = DK[q]; if (Math.max(Math.abs(R[j] - dr), Math.abs(G[j] - dg), Math.abs(B[j] - db)) <= 40) tight++; }
-          if (tight >= nd * 0.7) { mr = dr; mg = dg; mb = db; }
-        }
+      alpha[i] = all ? (n + nl) / all : 0;
+      if (!n && !nl) continue;
+      if (mask) {
+        lineFrac[i] = nl / (n + nl);
+        if (nl) { const t = typical(LR, LG, LB, nl); lineRgb[i * 3] = t[0]; lineRgb[i * 3 + 1] = t[1]; lineRgb[i * 3 + 2] = t[2]; }
       }
-      const near = (r0, g0, b0) => {
-        let sr = 0, sgc = 0, sb = 0, k = 0;
-        for (let j = 0; j < n; j++) {
-          if (Math.max(Math.abs(R[j] - r0), Math.abs(G[j] - g0), Math.abs(B[j] - b0)) > 40) continue;
-          sr += R[j]; sgc += G[j]; sb += B[j]; k++;
-        }
-        return k ? [sr / k, sgc / k, sb / k, k] : null;
-      };
-      let m = near(mr, mg, mb);
-      if (!m || m[3] < n * 0.3) {
-        // 各通道的中位数拼出了一个格子里没有的颜色（两种颜色差不多各占一半时，比如红 + 蓝 → 紫）：
-        // 改取“离其他像素最近”的那个像素的颜色（中心点），只在格子里本来就有的颜色里选
-        const step = Math.max(1, Math.floor(n / 64));
-        let bj = 0, bv = Infinity;
-        for (let a = 0; a < n; a += step) {
-          let t = 0;
-          for (let c2 = 0; c2 < n; c2 += step) t += Math.max(Math.abs(R[a] - R[c2]), Math.abs(G[a] - G[c2]), Math.abs(B[a] - B[c2]));
-          if (t < bv) { bv = t; bj = a; }
-        }
-        m = near(R[bj], G[bj], B[bj]) || [R[bj], G[bj], B[bj]];
-      }
+      // 底色：所有像素的代表色（中位数附近：只压了一点线条的格子不会被拉暗；线条格另外用 lineRgb）
+      if (nl) { for (let j = 0; j < nl; j++) { R[n + j] = LR[j]; G[n + j] = LG[j]; B[n + j] = LB[j]; } }
+      const m = typical(R, G, B, n + nl);
       rgb[i * 3] = m[0]; rgb[i * 3 + 1] = m[1]; rgb[i * 3 + 2] = m[2];
     }
   }
-  return { rgb, alpha };
+  return { rgb, alpha, lineFrac, lineRgb };
+}
+
+// ---------- 线条 ----------
+
+/** 一维滑动最大 / 最小（单调队列，O(n)），半径 r */
+function slide(src, dst, n, stride, off, r, isMax) {
+  const q = new Int32Array(n);
+  let h = 0, t = 0;
+  const better = isMax ? (a, b) => a >= b : (a, b) => a <= b;
+  for (let i = 0; i < n + r; i++) {
+    if (i < n) {
+      const v = src[off + i * stride];
+      while (t > h && better(v, src[off + q[t - 1] * stride])) t--;
+      q[t++] = i;
+    }
+    const c = i - r;
+    if (c >= 0) {
+      while (q[h] < c - r) h++;
+      dst[off + c * stride] = src[off + q[h] * stride];
+    }
+  }
+}
+function morph(L, W, H, r, isMax) {
+  const a = new Float32Array(W * H), b = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) slide(L, a, W, 1, y * W, r, isMax);
+  for (let x = 0; x < W; x++) slide(a, b, H, W, x, r, isMax);
+  return b;
+}
+
+/**
+ * 线条（轮廓线、描边）：比两边都暗、宽度不到一格左右的细长结构（灰度“闭运算 − 原图”，也叫黑帽变换）。
+ * 太小的、不够长的一点点（纹理、噪点）不算。cellPx：一格多少像素。返回 Uint8Array（1 = 线条上的像素）
+ */
+export function lineMask(img, cellPx, { T = 40 } = {}) {
+  const { data: d, width: W, height: H } = img;
+  const L = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) {
+    const q = i * 4;
+    // 透明的地方当成白色：透明背景上的深色描边也算线条
+    L[i] = d[q + 3] < OPA ? 255 : 0.299 * d[q] + 0.587 * d[q + 1] + 0.114 * d[q + 2];
+  }
+  const r = Math.max(1, Math.round(cellPx * 0.6));
+  const close = morph(morph(L, W, H, r, true), W, H, r, false);
+  const mask = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) if (close[i] - L[i] > T) mask[i] = 1;
+  // 去掉小点点：面积不到半格、也不够长的连通块
+  const seen = new Uint8Array(W * H), stack = [], comp = [];
+  const minArea = cellPx * cellPx * 0.6, minLen = cellPx * 2.5;
+  for (let s0 = 0; s0 < W * H; s0++) {
+    if (!mask[s0] || seen[s0]) continue;
+    comp.length = 0; stack.push(s0); seen[s0] = 1;
+    let x0 = W, x1 = 0, y0 = H, y1 = 0;
+    while (stack.length) {
+      const i = stack.pop(); comp.push(i);
+      const x = i % W, y = (i / W) | 0;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = x + dx, yy = y + dy;
+        if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+        const j = yy * W + xx;
+        if (mask[j] && !seen[j]) { seen[j] = 1; stack.push(j); }
+      }
+    }
+    if (comp.length < minArea || Math.max(x1 - x0, y1 - y0) + 1 < minLen) for (const i of comp) mask[i] = 0;
+  }
+  return mask;
+}
+
+/**
+ * 格子级的线条：线条像素占到一定比例的格子；同一条线压在两排格子上时，留压得多的那排（不让线条变成两格粗），
+ * 但不能把线条拆断（只去掉“去掉后周围的线条格还连着”的格子）。
+ */
+export function lineCells(frac, active, cols, rows, th = 0.15) {
+  const N = cols * rows, isL = new Uint8Array(N);
+  for (let i = 0; i < N; i++) if (active[i] && frac[i] >= th) isL[i] = 1;
+  const OFF = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]];
+  const simple = (r, c) => {
+    // 周围 8 格里的线条格（8 连通）只有一块，而且至少有 2 格（不是线头）
+    const on = OFF.map(([dx, dy]) => { const rr = r + dy, cc = c + dx; return rr >= 0 && cc >= 0 && rr < rows && cc < cols && isL[rr * cols + cc]; });
+    const cnt = on.filter(Boolean).length;
+    if (cnt < 2) return false;
+    const seen = new Array(8).fill(false);
+    let comps = 0;
+    for (let k = 0; k < 8; k++) {
+      if (!on[k] || seen[k]) continue;
+      comps++;
+      const st = [k]; seen[k] = true;
+      while (st.length) {
+        const a = st.pop();
+        for (let b = 0; b < 8; b++) {
+          if (!on[b] || seen[b]) continue;
+          if (Math.max(Math.abs(OFF[a][0] - OFF[b][0]), Math.abs(OFF[a][1] - OFF[b][1])) === 1) { seen[b] = true; st.push(b); }
+        }
+      }
+    }
+    return comps === 1;
+  };
+  for (let pass = 0; pass < 3; pass++) {
+    const order = [];
+    for (let i = 0; i < N; i++) if (isL[i]) order.push(i);
+    order.sort((a, b) => frac[a] - frac[b]);
+    let changed = false;
+    for (const i of order) {
+      const r = (i / cols) | 0, c = i % cols;
+      let stronger = false;
+      for (const [dx, dy] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
+        const rr = r + dy, cc = c + dx;
+        if (rr < 0 || cc < 0 || rr >= rows || cc >= cols) continue;
+        const j = rr * cols + cc;
+        // 一条线压在两排格子上：旁边那格压得不比这格少、两格加起来也不到一格半（线本来不到一格半粗），
+        // 而且这一格的另一边不是线条 → 这格是两排里多出来的那排（线本来就粗的，两格都压满了，不动）
+        if (isL[j] && frac[j] >= frac[i] && frac[i] + frac[j] < 1.4) {
+          const or = r - dy, oc = c - dx;
+          if (!(or >= 0 && oc >= 0 && or < rows && oc < cols && isL[or * cols + oc])) stronger = true;
+        }
+      }
+      if (stronger && simple(r, c)) { isL[i] = 0; changed = true; }
+    }
+    if (!changed) break;
+  }
+  // 只有一两格的“线条”不算线条（照片里毛发、纹理的一小段）
+  const seen = new Uint8Array(N);
+  for (let s0 = 0; s0 < N; s0++) {
+    if (!isL[s0] || seen[s0]) continue;
+    const comp = [s0]; seen[s0] = 1;
+    for (let q = 0; q < comp.length; q++) {
+      const i = comp[q], r = (i / cols) | 0, c = i % cols;
+      for (const [dx, dy] of OFF) {
+        const rr = r + dy, cc = c + dx;
+        if (rr < 0 || cc < 0 || rr >= rows || cc >= cols) continue;
+        const j = rr * cols + cc;
+        if (isL[j] && !seen[j]) { seen[j] = 1; comp.push(j); }
+      }
+    }
+    if (comp.length < 3) for (const i of comp) isL[i] = 0;
+  }
+  return isL;
+}
+
+// ---------- 忽略细节 ----------
+
+/** 细节多少：精细（原样）/ 适中 / 简洁。smooth：格子级保边平滑几遍；minArea：小于这么多格的同色小块并到周围；maxDE：差多少以内才并 */
+export function detailParams(detail, N) {
+  const a = Math.round(2 + Math.sqrt(N) / 40);
+  if (detail === 'fine') return { smooth: 0, sig: 0, minArea: 0, maxDE: 0 };
+  if (detail === 'simple') return { smooth: 2, sig: 10, minArea: a * 2, maxDE: 38 };
+  return { smooth: 1, sig: 8, minArea: a, maxDE: 30 };
+}
+
+/** 格子级的保边平滑（双边滤波，Lab）：一片里细小的明暗变化抹平，颜色分界不动；线条格不参与 */
+function smoothCells(lab, active, isL, cols, rows, sig, passes) {
+  const N = cols * rows;
+  let cur = lab;
+  for (let p = 0; p < passes; p++) {
+    const out = new Float32Array(cur);
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      if (!active[i] || isL[i]) continue;
+      let w0 = 0, s0 = 0, s1 = 0, s2 = 0;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const rr = r + dy, cc = c + dx;
+        if (rr < 0 || cc < 0 || rr >= rows || cc >= cols) continue;
+        const j = rr * cols + cc;
+        if (!active[j] || isL[j]) continue;
+        const e0 = cur[j * 3] - cur[i * 3], e1 = cur[j * 3 + 1] - cur[i * 3 + 1], e2 = cur[j * 3 + 2] - cur[i * 3 + 2];
+        const w = Math.exp(-(e0 * e0 + e1 * e1 + e2 * e2) / (2 * sig * sig) - (dx * dx + dy * dy) / 4.5);
+        w0 += w; s0 += w * cur[j * 3]; s1 += w * cur[j * 3 + 1]; s2 += w * cur[j * 3 + 2];
+      }
+      out[i * 3] = s0 / w0; out[i * 3 + 1] = s1 / w0; out[i * 3 + 2] = s2 / w0;
+    }
+    cur = out;
+  }
+  return cur;
+}
+
+/**
+ * 小于 minArea 格的同色小块（4 连通，线条格不算）并到周围接得最多的那种颜色（颜色差 maxDE 以内才并：
+ * 一片里的杂色、细碎的明暗都并掉；眼睛、高光这种和周围差得多的留着）。pick：每格的色号序号（-1 = 空），就地改
+ */
+export function mergeSmall(pick, active, isL, cols, rows, palLab, minArea, maxDE) {
+  if (!minArea) return;
+  const N = cols * rows;
+  for (let pass = 0; pass < 3; pass++) {
+    const comp = new Int32Array(N).fill(-1), comps = [];
+    for (let s0 = 0; s0 < N; s0++) {
+      if (comp[s0] >= 0 || pick[s0] < 0 || isL[s0]) continue;
+      const k = pick[s0], cells = [s0], id = comps.length;
+      comp[s0] = id;
+      for (let q = 0; q < cells.length; q++) {
+        const i = cells[q], r = (i / cols) | 0, c = i % cols;
+        for (const j of [c > 0 ? i - 1 : -1, c < cols - 1 ? i + 1 : -1, r > 0 ? i - cols : -1, r < rows - 1 ? i + cols : -1]) {
+          if (j < 0 || comp[j] >= 0 || isL[j] || pick[j] !== k) continue;
+          comp[j] = id; cells.push(j);
+        }
+      }
+      comps.push({ k, cells });
+    }
+    comps.sort((a, b) => a.cells.length - b.cells.length);
+    let changed = false;
+    for (const cp of comps) {
+      if (cp.cells.length >= minArea) break;
+      const k = pick[cp.cells[0]];
+      const inC = new Set(cp.cells), cnt = new Map();
+      for (const i of cp.cells) {
+        const r = (i / cols) | 0, c = i % cols;
+        for (const j of [c > 0 ? i - 1 : -1, c < cols - 1 ? i + 1 : -1, r > 0 ? i - cols : -1, r < rows - 1 ? i + cols : -1]) {
+          if (j < 0 || inC.has(j) || pick[j] < 0 || isL[j] || pick[j] === k) continue;
+          cnt.set(pick[j], (cnt.get(pick[j]) || 0) + 1);
+        }
+      }
+      let t = -1, tn = 0, te = Infinity;
+      for (const [m, n] of cnt) {
+        const e = de2000(palLab[k], palLab[m]);
+        if (n > tn || (n === tn && e < te)) { t = m; tn = n; te = e; }
+      }
+      if (t < 0 || te > maxDE) continue;
+      for (const i of cp.cells) pick[i] = t;
+      changed = true;
+    }
+    if (!changed) break;
+  }
 }
 
 // ---------- 背景 ----------
@@ -310,7 +534,9 @@ export function findBackground(lab, rgb, active, cols, rows) {
  *   via: { cols, rows },     像素画换成别的尺寸：rect 是原来的像素格，先按它取出每个像素
  *   pal: [[色号, r, g, b]],  能用的颜色
  *   maxColors,               最多几种颜色（0 = 不限）
- *   bg, dither, clean,       去背景、抖动、去杂点
+ *   bg, dither,              去背景、抖动
+ *   lines,                   保留线条（默认开；像素画不用）
+ *   detail,                  细节多少：'fine' 精细 / 'mid' 适中（默认）/ 'simple' 简洁（旧的 clean:false 当 fine）
  *   replace: [[原色号, 换成]] 选好之后整种颜色换掉（换成的可以不在 pal 里）
  * }
  * 返回 { cols, rows, codes（颗数多的在前）, cells（Uint8Array，0 = 空，k = codes[k-1]）, counts, beads, bgFound, bgRemoved, transparent, err（平均色差） }
@@ -329,19 +555,36 @@ export function convertPhoto(img, o) {
     src = { data: d, width: o.via.cols, height: o.via.rows };
     rect = { x: 0, y: 0, w: o.via.cols, h: o.via.rows };
   }
-  const s = sampleCells(src, rect, cols, rows, { inner: !!o.inner, lines: !o.inner && !o.via });
+  // 照片、插画（不是像素画）：先找出线条（轮廓线、描边），线条格保持线条本来的颜色、连成一条；其余格子按“细节多少”抹掉细碎的东西
+  const photo = !o.inner && !o.via;
+  const cellPx = Math.min(rect.w / cols, rect.h / rows);
+  const wantLines = photo && o.lines !== false && cellPx >= 3;
+  const detail = !photo ? 'fine' : o.detail || (o.clean === false ? 'fine' : 'mid');
+  const DP = { ...detailParams(detail, N), ...(o.dp || {}) };
+  const s = sampleCells(src, rect, cols, rows, { inner: !!o.inner, mask: wantLines ? lineMask(src, cellPx) : null });
   const lab = new Float32Array(N * 3), active = new Uint8Array(N);
   let transparent = 0;
   for (let i = 0; i < N; i++) {
     if (s.alpha[i] < 0.5) { transparent++; continue; }
     active[i] = 1;
-    const L = rgbToLab([s.rgb[i * 3], s.rgb[i * 3 + 1], s.rgb[i * 3 + 2]]);
+  }
+  const isL = wantLines ? lineCells(s.lineFrac, active, cols, rows) : new Uint8Array(N);
+  const rgbC = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    if (!active[i]) continue;
+    const src3 = isL[i] ? s.lineRgb : s.rgb;
+    rgbC[i * 3] = src3[i * 3]; rgbC[i * 3 + 1] = src3[i * 3 + 1]; rgbC[i * 3 + 2] = src3[i * 3 + 2];
+    const L = rgbToLab([rgbC[i * 3], rgbC[i * 3 + 1], rgbC[i * 3 + 2]]);
     lab[i * 3] = L[0]; lab[i * 3 + 1] = L[1]; lab[i * 3 + 2] = L[2];
   }
-  const bgInfo = findBackground(lab, s.rgb, active, cols, rows);
+  const bgInfo = findBackground(lab, rgbC, active, cols, rows);
   let bgRemoved = 0;
-  if (bgInfo && o.bg) for (let i = 0; i < N; i++) if (bgInfo.mask[i]) { active[i] = 0; bgRemoved++; }
-  const base = { cols, rows, bgFound: !!bgInfo, bgRgb: bgInfo?.rgb || null, bgRemoved, transparent };
+  if (bgInfo && o.bg) for (let i = 0; i < N; i++) if (bgInfo.mask[i]) { active[i] = 0; isL[i] = 0; bgRemoved++; }
+  let nLine = 0;
+  for (let i = 0; i < N; i++) nLine += isL[i];
+  // 忽略细节：格子级保边平滑（细碎的明暗变化抹平，颜色分界、线条不动）
+  if (DP.smooth) lab.set(smoothCells(lab, active, isL, cols, rows, DP.sig, DP.smooth));
+  const base = { cols, rows, bgFound: !!bgInfo, bgRgb: bgInfo?.rgb || null, bgRemoved, transparent, lineCells: nLine, detail };
   let nAct = 0;
   for (let i = 0; i < N; i++) nAct += active[i];
   if (!nAct) return { ...base, error: transparent === N ? '图上全是透明的，没有可以拼的部分' : '去掉背景后什么都不剩了（可以关掉“去掉背景”）', codes: [], cells: new Uint8Array(N), counts: [], beads: 0 };
@@ -350,20 +593,22 @@ export function convertPhoto(img, o) {
   const M = pal.length;
   const palLab = pal.map(p => rgbToLab([p[1], p[2], p[3]]));
 
-  // 一样（差不多一样）的颜色只算一次：RGB 各取高 5 位
+  // 一样（差不多一样）的颜色只算一次（Lab 每 3 个单位一档；线条格单独一档）。
+  // 线条格的权重大一些：限颜色数时线条的颜色（往往只有几十格）也留得住
+  const LW = 4;
   const bin = new Map(), cellU = new Int32Array(N).fill(-1);
   const uacc = [];
   for (let i = 0; i < N; i++) {
     if (!active[i]) continue;
-    const key = ((s.rgb[i * 3] >> 3) << 10) | ((s.rgb[i * 3 + 1] >> 3) << 5) | (s.rgb[i * 3 + 2] >> 3);
+    const key = `${isL[i]}|${Math.round(lab[i * 3] / 3)}|${Math.round(lab[i * 3 + 1] / 3)}|${Math.round(lab[i * 3 + 2] / 3)}`;
     let u = bin.get(key);
-    if (u == null) { u = uacc.length; bin.set(key, u); uacc.push([0, 0, 0, 0]); }
+    if (u == null) { u = uacc.length; bin.set(key, u); uacc.push([0, 0, 0, 0, 0]); }
     const a = uacc[u];
-    a[0] += lab[i * 3]; a[1] += lab[i * 3 + 1]; a[2] += lab[i * 3 + 2]; a[3]++;
+    a[0] += lab[i * 3]; a[1] += lab[i * 3 + 1]; a[2] += lab[i * 3 + 2]; a[3]++; a[4] += isL[i] ? LW : 1;
     cellU[i] = u;
   }
   const U = uacc.length;
-  const ulab = uacc.map(a => [a[0] / a[3], a[1] / a[3], a[2] / a[3]]), uw = uacc.map(a => a[3]);
+  const ulab = uacc.map(a => [a[0] / a[3], a[1] / a[3], a[2] / a[3]]), uw = uacc.map(a => a[4]);
   // 每个颜色到每个色号的色差（平方）
   const D = new Float32Array(U * M);
   for (let u = 0; u < U; u++) for (let m = 0; m < M; m++) { const e = de2000(ulab[u], palLab[m]); D[u * M + m] = e * e; }
@@ -386,7 +631,7 @@ export function convertPhoto(img, o) {
       for (const b of S) {
         if (b === a) continue;
         const wb = wOf.get(b) || 0, e = de2000(palLab[a], palLab[b]);
-        if ((e < 2.5 && wb >= wa) || (e < 5 && wa < wb * 0.2)) { S.delete(a); wOf.set(b, wb + wa); break; }
+        if ((e < 3.2 && wb >= wa) || (e < 5 && wa < wb * 0.2)) { S.delete(a); wOf.set(b, wb + wa); break; }
       }
     }
   } else if (S.size > K) {
@@ -442,6 +687,8 @@ export function convertPhoto(img, o) {
       for (let cc = 0; cc < cols; cc++) {
         const c = rev ? cols - 1 - cc : cc, i = r * cols + c;
         if (!active[i]) continue;
+        // 线条格不掺：直接取最接近的色号，误差也不往外扩散
+        if (isL[i]) { pick[i] = nearestIn(cellU[i], Sl); continue; }
         const t = [lab[i * 3] + lim(err[i * 3]), lab[i * 3 + 1] + lim(err[i * 3 + 1]), lab[i * 3 + 2] + lim(err[i * 3 + 2])];
         let b = Sl[0], bv = Infinity;
         for (const m of Sl) { const v = de2000(t, palLab[m]); if (v < bv) { bv = v; b = m; } }
@@ -451,7 +698,7 @@ export function convertPhoto(img, o) {
         const spread = (rr, c2, f) => {
           if (rr >= rows || c2 < 0 || c2 >= cols) return;
           const j = rr * cols + c2;
-          if (!active[j]) return;
+          if (!active[j] || isL[j]) return;
           err[j * 3] += e[0] * f; err[j * 3 + 1] += e[1] * f; err[j * 3 + 2] += e[2] * f;
         };
         spread(r, c + dx, 7 / 16); spread(r + 1, c - dx, 3 / 16); spread(r + 1, c, 5 / 16); spread(r + 1, c + dx, 1 / 16);
@@ -461,29 +708,8 @@ export function convertPhoto(img, o) {
     const best = new Int32Array(U);
     for (let u = 0; u < U; u++) best[u] = nearestIn(u, Sl);
     for (let i = 0; i < N; i++) if (active[i]) pick[i] = best[cellU[i]];
-    if (o.clean) {
-      // 零星杂点：周围 8 格没有一个同色、周围多数是一个和它差不多的颜色 → 换成那个颜色（眼睛、高光这种差得多的不动）
-      const src = pick.slice();
-      for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-        const i = r * cols + c, k = src[i];
-        if (k < 0) continue;
-        const cnt = new Map();
-        let same = false;
-        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-          if (!dx && !dy) continue;
-          const rr = r + dy, c2 = c + dx;
-          if (rr < 0 || rr >= rows || c2 < 0 || c2 >= cols) continue;
-          const v = src[rr * cols + c2];
-          if (v < 0) continue;
-          if (v === k) { same = true; break; }
-          cnt.set(v, (cnt.get(v) || 0) + 1);
-        }
-        if (same) continue;
-        let m = -1, mv = 0;
-        for (const [v, n] of cnt) if (n > mv) { mv = n; m = v; }
-        if (m >= 0 && mv >= 3 && de2000(palLab[k], palLab[m]) < 20) pick[i] = m;
-      }
-    }
+    // 忽略细节：小块的同色并到周围（线条格不动）
+    mergeSmall(pick, active, isL, cols, rows, palLab, DP.minArea, DP.maxDE);
   }
 
   // 平均色差（看效果用）

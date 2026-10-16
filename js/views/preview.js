@@ -124,8 +124,10 @@ async function ensurePattern(s, status) {
     fullId: im.fullId, fw: im.fw, fh: im.fh, name: im.name || '',
     legend: im.legend || (im.fullMap ? { x: im.fullMap.ox, y: im.fullMap.oy, w: im.dw * im.fullMap.k, h: im.dh * im.fullMap.k } : null),
   }));
-  // 总览时已经数字化过、清单后来又没变：拼豆板直接存上
-  const board = s.boardPre && s.boardPre.sig === itemsSig(items) ? s.boardPre.board : null;
+  // 由图片生成的：拼豆板就是生成时直接算出来的那一块（每格的色号是定的），原样存上，以后不再扫描图片
+  // 识别的：总览时已经数字化过、清单后来又没变，拼豆板直接存上
+  const board = s.method === 'photo' && s.boardPre?.board ? s.boardPre.board
+    : s.boardPre && s.boardPre.sig === itemsSig(items) ? s.boardPre.board : null;
   const id = await store.savePattern({
     name: s.name || '未命名图纸', status, items, method: s.method, tags: s.tags || [],
     statedTotal: s.statedTotal || null, thumbs: t.images,

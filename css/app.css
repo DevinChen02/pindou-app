@@ -850,3 +850,7 @@ main.build-view > .ro-banner { border-radius: 0; margin: 0; }
 .pg-colors .pg-short { display: flex; align-items: center; flex-wrap: wrap; }
 .pv-gen { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; font: inherit; color: var(--text); background: var(--card); border: 0; border-radius: var(--radius); box-shadow: var(--shadow); padding: 10px 12px; margin: 10px 0; cursor: pointer; }
 .pv-gen img { width: 64px; height: 64px; object-fit: contain; image-rendering: pixelated; border-radius: 8px; background: var(--card-2); flex-shrink: 0; }
+.pg-detail { flex-wrap: wrap; }
+.pg-detail .grow { min-width: 0; flex-basis: 100%; }
+.pg-detail-seg { flex: 1; }
+.pg-detail-seg button { min-height: 34px; }

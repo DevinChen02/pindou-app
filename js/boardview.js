@@ -317,6 +317,8 @@ export function boardStage({ board, place, sel, done, show, spot, onMirror, onSp
   if (last && last.until > Date.now()) showInfo(last.text, last.until);
   pz = createPanZoom(stage, layer, {
     maxFit: 14,
+    // 下边的“镜像、高亮、缩放”按钮叠在拼豆板上：适合时拼豆板放在按钮上面，放大后最下面几排也能拖到按钮上面来
+    inset: () => ({ bottom: zoomBar.offsetHeight ? stage.clientHeight - zoomBar.offsetTop + 6 : 0 }),
     onChange: st => { rulers.update(st); markEl?.style.setProperty('--k', String(1 / st.s)); },
     onTap: ({ x, y }) => {
       // 点的是拼豆板上第几行第几列（镜像时左右反过来），再换回图纸网格里的那一格

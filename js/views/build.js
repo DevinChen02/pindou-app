@@ -14,7 +14,7 @@ import { goPattern, finishAndShow, revertPending } from './patterns.js';
 import { renderSetup, startSetup, setupActive } from './boardsetup.js';
 import { ipadSheet, sentToIpad, scanProgress } from './ipad-send.js';
 import { readOnlyText } from '../license.js';
-import { isGenerated } from './photo.js';
+import { isGenerated, regenerate } from './photo.js';
 
 // 别的页面（准备拼豆板、测试）从这里拿画拼豆板的函数
 export { placeOf, guideStart, guideLines, cellNum, cellWhere, boardSize, drawBoard, orderItems, BUILD_ORDERS, BUILD_SHOWS } from '../boardview.js';
@@ -101,8 +101,16 @@ export async function renderBuild(app) {
   const view = clear(app.view);
 
   const hasImg = p.images?.some(im => im.fullId);
-  // 第一次进来（或者还没选拼豆板尺寸）：先准备拼豆板（框选 → 网格 → 颜色 → 尺寸 → 摆放）
   const ro = app.readOnly;
+  // 由图片生成的图纸：拼豆板是生成时直接算好的，从来不扫描图片。万一拼豆板不在了（比如导入的备份不完整），
+  // 只能从原图按原来的选项重新生成，不去识别那张图纸图
+  if (isGenerated(p) && !p.board) {
+    view.append(h('div.card.gen-noboard', h('p', h('b', '这张图纸的拼豆板不见了')),
+      h('p.small.muted', '它是由图片生成的：拼豆板要从原图重新生成（不会去扫描图纸图）。'),
+      ro ? h('p.small.muted', readOnlyText(ro)) : h('button.btn.primary', { onclick: () => regenerate(app, p) }, '🎨 重新生成')));
+    return;
+  }
+  // 第一次进来（或者还没选拼豆板尺寸）：先准备拼豆板（框选 → 网格 → 颜色 → 尺寸 → 摆放；生成的图纸只有尺寸 → 摆放）
   if (hasImg && ((!p.board?.place && !p.boardSkip) || setupActive(p))) {
     if (!ro) return renderSetup(app, p);
     view.append(h('div.card', h('p', h('b', '这张图纸还没有准备好拼豆板')), h('p.small.muted', readOnlyText(ro))));
