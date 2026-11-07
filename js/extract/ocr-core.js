@@ -590,6 +590,16 @@ function dropRulerRows(codes, counts, amb, junk) {
 export function pairWords(words, normalizeCode) {
   const codes = [], counts = [], amb = [], junk = [];
   for (const wd of words) {
+    // 色号和数量离得近、被当成了一个词：“G14 36”（中间有空格）。按字数比例切开，当成粘在一起的一对
+    const sp = String(wd.text || '').trim().match(/^([A-Za-z]{1,3}\d{1,3})\s+\(?(\d{1,5})\)?$/);
+    if (sp && normalizeCode(sp[1])) {
+      const all = String(wd.text).trim();
+      const mid = wd.x0 + (wd.x1 - wd.x0) * (sp[1].length / all.length);
+      const g = codes.length + 1;
+      codes.push({ ...wd, x1: mid, raw: sp[1], code: normalizeCode(sp[1]), glued: g });
+      counts.push({ ...wd, x0: mid + (wd.x1 - wd.x0) / all.length, n: +sp[2], prefixed: true, glued: g });
+      continue;
+    }
     let t = String(wd.text || '').replace(/\s+/g, '');
     // 去掉首尾杂字符（例如 "(G14" 里多读的括号），但保留数量两边成对的括号
     if (!/^\(\d+\)$/.test(t)) t = t.replace(/^[^A-Za-z0-9x]+/, '').replace(/[^0-9A-Za-z)]+$/, '').replace(/^([A-Za-z]{1,3}\d{1,3})\)$/, '$1');
@@ -802,9 +812,137 @@ export async function readLegend(img, readWord, normalizeCode, { onWord, opt = {
   return score(b) > score(a) ? b : a;
 }
 
+/**
+ * 色块不在色号底下的清单（“B20 (24) ■”：色号、数量印在白底上，色块在旁边）：找每一项的色块在哪。
+ * 色号字大多压在色块上的（一般的清单）返回全 null，照旧用色号四周的颜色。
+ * 做法：先找出清单里所有的实心色块（一整块同一种颜色、和底色不同、大小和字差不多的矩形）；
+ * 再看“色块相对文字”的方向（右边 / 左边 / 上面 / 下面），哪个方向几乎每一项都有、而且距离一致就是这种版式；
+ * 最后按这个距离给每一项定位——白色的色块（和白底分不出来）也按同样的距离取。
+ * pairs 的坐标是 img 的 s 倍（analyze 放大过）；返回 img 坐标的框（或 null），和 pairs 一一对应。
+ */
+export function locateSwatches(img, pairs, s = 1, dbg = null) {
+  const none = pairs.map(() => null);
+  const W = img.width, H = img.height, D = img.data;
+  const sc = b => b && { x0: b.x0 / s, y0: b.y0 / s, x1: b.x1 / s, y1: b.y1 / s };
+  const items = pairs.map(p => {
+    const c = sc(p.codeBox), n = sc(p.countBox);
+    if (!c) return null;
+    const t = n ? { x0: Math.min(c.x0, n.x0), y0: Math.min(c.y0, n.y0), x1: Math.max(c.x1, n.x1), y1: Math.max(c.y1, n.y1) } : c;
+    return { c, t, h: c.y1 - c.y0 };
+  });
+  const live = items.filter(Boolean);
+  if (live.length < 2) return none;
+  const h = median(live.map(it => it.h));
+  if (!(h >= 4)) return none;
+  // 底色：清单里出现最多的颜色
+  const step = Math.max(1, Math.floor(h / 8));
+  const bins = new Map();
+  for (let y = 0; y < H; y += step) for (let x = 0; x < W; x += step) {
+    const p = (y * W + x) * 4, k = (D[p] >> 4) << 8 | (D[p + 1] >> 4) << 4 | (D[p + 2] >> 4);
+    const e = bins.get(k) || [0, 0, 0, 0]; e[0] += D[p]; e[1] += D[p + 1]; e[2] += D[p + 2]; e[3]++; bins.set(k, e);
+  }
+  let top = null; for (const e of bins.values()) if (!top || e[3] > top[3]) top = e;
+  const bg = [top[0] / top[3], top[1] / top[3], top[2] / top[3]];
+  const isBg = p => Math.abs(D[p] - bg[0]) + Math.abs(D[p + 1] - bg[1]) + Math.abs(D[p + 2] - bg[2]) <= 30;
+  // 色号字是不是印在底色上：看字框外面紧挨着的一圈（字的笔画在框里，不算），大多是底色就是。
+  // 大部分项都不是 → 一般的清单（色号印在色块上），不用找
+  const onBg = it => {
+    const m = Math.max(2, it.h * 0.35), c = it.c;
+    const x0 = Math.max(0, Math.round(c.x0 - m)), x1 = Math.min(W, Math.round(c.x1 + m));
+    const y0 = Math.max(0, Math.round(c.y0 - m)), y1 = Math.min(H, Math.round(c.y1 + m));
+    let n = 0, b = 0;
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+      if (x >= c.x0 && x < c.x1 && y >= c.y0 && y < c.y1) continue;
+      n++; if (isBg((y * W + x) * 4)) b++;
+    }
+    return n && b > n * 0.6;
+  };
+  if (dbg) Object.assign(dbg, { h, bg, onBg: live.filter(onBg).length, live: live.length });
+  if (live.filter(onBg).length < live.length * 0.6) return none;
+  // 实心色块：按 f 像素一格取样，相邻两格颜色接近就连成一块
+  const f = Math.max(1, Math.floor(h / 10)), gw = Math.ceil(W / f), gh = Math.ceil(H / f);
+  const par = new Int32Array(gw * gh).fill(-1);
+  const find = i => { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; };
+  const at = (gx, gy) => (Math.min(H - 1, gy * f) * W + Math.min(W - 1, gx * f)) * 4;
+  for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) if (!isBg(at(gx, gy))) par[gy * gw + gx] = gy * gw + gx;
+  const close = (p, q) => Math.abs(D[p] - D[q]) + Math.abs(D[p + 1] - D[q + 1]) + Math.abs(D[p + 2] - D[q + 2]) <= 24;
+  for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) {
+    const i = gy * gw + gx; if (par[i] < 0) continue;
+    if (gx + 1 < gw && par[i + 1] >= 0 && close(at(gx, gy), at(gx + 1, gy))) { const a = find(i), b = find(i + 1); if (a !== b) par[a] = b; }
+    if (gy + 1 < gh && par[i + gw] >= 0 && close(at(gx, gy), at(gx, gy + 1))) { const a = find(i), b = find(i + gw); if (a !== b) par[a] = b; }
+  }
+  const comp = new Map();
+  for (let i = 0; i < par.length; i++) if (par[i] >= 0) {
+    const r = find(i), gx = i % gw, gy = (i / gw) | 0;
+    const e = comp.get(r) || { x0: gx, y0: gy, x1: gx, y1: gy, n: 0 };
+    e.x0 = Math.min(e.x0, gx); e.y0 = Math.min(e.y0, gy); e.x1 = Math.max(e.x1, gx); e.y1 = Math.max(e.y1, gy); e.n++;
+    comp.set(r, e);
+  }
+  const blobs = [];
+  for (const e of comp.values()) {
+    const bw = (e.x1 - e.x0 + 1) * f, bh = (e.y1 - e.y0 + 1) * f;
+    if (bw < h * 0.6 || bh < h * 0.6 || bw > h * 8 || bh > h * 8) continue;
+    if (e.n * f * f < bw * bh * 0.6) continue;   // 不是实心的（字、线条）
+    const b = { x0: e.x0 * f, y0: e.y0 * f, x1: Math.min(W, (e.x1 + 1) * f), y1: Math.min(H, (e.y1 + 1) * f) };
+    // 压着文字的（字本身连成的块、底纹）不算
+    if (live.some(it => b.x0 < it.t.x1 && it.t.x0 < b.x1 && b.y0 < it.t.y1 && it.t.y0 < b.y1)) continue;
+    blobs.push({ ...b, cx: (b.x0 + b.x1) / 2, cy: (b.y0 + b.y1) / 2 });
+  }
+  if (dbg) { dbg.blobs = blobs.length; dbg.blobList = blobs.map(b => [b.x0, b.x1, b.y0, b.y1]); }
+  if (blobs.length < 2) return none;
+  // 四个方向各试一遍：这一项在这个方向上最近的色块（同一行 / 同一列、隔着不到 3 个字高）
+  const DIRS = ['right', 'left', 'below', 'above'];
+  const ov = (a0, a1, b0, b1) => Math.min(a1, b1) - Math.max(a0, b0);
+  const nearest = (it, d) => {
+    let best = null, bd = Infinity;
+    const t = it.t;
+    for (const b of blobs) {
+      const row = ov(t.y0, t.y1, b.y0, b.y1) > Math.min(t.y1 - t.y0, b.y1 - b.y0) * 0.4;
+      const col = ov(t.x0, t.x1, b.x0, b.x1) > Math.min(t.x1 - t.x0, b.x1 - b.x0) * 0.3;
+      const gap = d === 'right' ? (row ? b.x0 - t.x1 : -1) : d === 'left' ? (row ? t.x0 - b.x1 : -1)
+        : d === 'below' ? (col ? b.y0 - t.y1 : -1) : (col ? t.y0 - b.y1 : -1);
+      if (gap < 0 || gap > h * 6 || gap >= bd) continue;
+      bd = gap; best = { ...b, gap };
+    }
+    return best;
+  };
+  // 色块相对文字的位置：按几种“对齐点”量（色号左上角、文字中心、文字右上角）——一列里左对齐时色块离色号开头的距离是固定的，
+  // 数量位数不同、文字长短不一也不影响
+  const ANCHORS = [it => [it.c.x0, it.c.y0], it => [(it.t.x0 + it.t.x1) / 2, (it.t.y0 + it.t.y1) / 2], it => [it.t.x1, it.t.y0]];
+  let pick = null;
+  for (const d of DIRS) {
+    const hits = items.map(it => (it ? nearest(it, d) : null));
+    if (dbg) (dbg.hits = dbg.hits || {})[d] = hits.map((b, i) => b ? [Math.round(items[i].t.x0), Math.round(items[i].t.x1), Math.round(items[i].t.y0), Math.round(items[i].t.y1), b.x0, b.x1, b.y0, b.y1] : (items[i] ? [Math.round(items[i].t.x0), Math.round(items[i].t.x1), Math.round(items[i].t.y0), Math.round(items[i].t.y1)] : null));
+    if (hits.filter(Boolean).length < 2) continue;
+    for (const A of ANCHORS) {
+      const vs = items.map((it, i) => { const b = hits[i]; if (!b) return null; const [ax, ay] = A(it); return [b.cx - ax, b.cy - ay]; });
+      const ok = vs.filter(Boolean);
+      const mx = median(ok.map(v => v[0])), my = median(ok.map(v => v[1]));
+      const inl = vs.map(v => !!v && Math.abs(v[0] - mx) <= h * 0.6 && Math.abs(v[1] - my) <= h * 0.6);
+      // 对得上的项多的赢；一样多时离文字近的赢
+      const n = inl.filter(Boolean).length - median(hits.filter(Boolean).map(b => b.gap)) / (h * 100);
+      if (dbg) (dbg.dirs = dbg.dirs || []).push([d, ANCHORS.indexOf(A), ok.length, n]);
+      if (!pick || n > pick.n) pick = { d, A, hits, inl, n, mx, my };
+    }
+  }
+  // 这种版式要几乎每一项都对得上
+  if (!pick || pick.n < Math.max(2, live.length * 0.6)) return none;
+  const good = pick.hits.filter((b, i) => b && pick.inl[i]);
+  const mw = median(good.map(b => b.x1 - b.x0)), mh = median(good.map(b => b.y1 - b.y0));
+  return items.map((it, i) => {
+    if (!it) return null;
+    const b0 = pick.hits[i];
+    if (b0 && pick.inl[i]) return { x0: b0.x0, y0: b0.y0, x1: b0.x1, y1: b0.y1 };
+    // 白色（和底色一样）的色块找不出来：按同样的位置、大小取
+    const [ax, ay] = pick.A(it), cx = ax + pick.mx, cy = ay + pick.my;
+    const b = { x0: Math.max(0, cx - mw / 2), y0: Math.max(0, cy - mh / 2), x1: Math.min(W, cx + mw / 2), y1: Math.min(H, cy + mh / 2) };
+    return b.x1 - b.x0 > 2 && b.y1 - b.y0 > 2 ? b : null;
+  });
+}
+
 /** 色块的颜色：框里（上下左右多 20%）出现最多的颜色（每通道 4 位量化）；字的笔画细，占不了多数 */
-export function swatchColor(img, b) {
-  const h = b.y1 - b.y0, m = h * 0.2;
+export function swatchColor(img, b, pad = 0.2) {
+  const h = b.y1 - b.y0, m = h * pad;   // pad < 0：往里缩（框本身就是色块时，去掉边上的描边）
   const x0 = Math.max(0, Math.round(b.x0 - m)), x1 = Math.min(img.width, Math.round(b.x1 + m));
   const y0 = Math.max(0, Math.round(b.y0 - m)), y1 = Math.min(img.height, Math.round(b.y1 + m));
   const bins = new Map();
@@ -832,6 +970,8 @@ export async function refineCodes(img, ana, pairs, scoreCodes, { rgbOf, deltaE, 
   const s = ana.scale || 1;
   const used = new Set(pairs.filter(p => p.code && !p.uncertain).map(p => p.code));
   const todo = pairs.filter(p => p.count != null && p.codeBox && (!p.code || p.uncertain));
+  // 色块在文字旁边的清单：色块的颜色从旁边取（色号四周只有白底）
+  const beside = todo.length && rgbOf && deltaE ? locateSwatches(img, pairs, s) : [];
   const ranked = [];
   for (let i = 0; i < todo.length; i++) {
     onItem?.(i + 1, todo.length);
@@ -840,7 +980,8 @@ export async function refineCodes(img, ana, pairs, scoreCodes, { rgbOf, deltaE, 
     const pad = (b.y1 - b.y0) * 0.35;
     const box = { x0: Math.max(0, b.x0 - pad), y0: Math.max(0, b.y0 - pad), x1: Math.min(img.width, b.x1 + pad), y1: Math.min(img.height, b.y1 + pad) };
     const lik = await scoreCodes(box);
-    const rgb = rgbOf && deltaE ? swatchColor(img, b) : null;
+    const sb = beside[pairs.indexOf(p)];
+    const rgb = rgbOf && deltaE ? (sb ? swatchColor(img, sb, -0.15) : swatchColor(img, b)) : null;
     const cand = [...lik].filter(([, l]) => Number.isFinite(l)).map(([code, l]) => {
       const pc = rgb && rgbOf(code), d = pc ? deltaE(rgb, pc) : 0;
       return { code, l, d, score: l - (d / sigma) ** 2 / 2 };

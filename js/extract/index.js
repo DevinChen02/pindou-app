@@ -74,9 +74,10 @@ export async function extractImage(method, settings, work, imgIndex, { onStatus,
   const items = res.items.map(it => {
     const code = it.code !== undefined ? it.code : normalizeCode(it.rawCode);
     // 清单色块的颜色（候选几种）：核对时比色卡，生成拼豆板时直接当这一色在图上的参考色
+    // （色块印在文字旁边的清单，离线 OCR 会找出色块的位置 swatchBox；一般的清单色块就在色号底下）
     let swatch = null;
-    if (it.box) {
-      try { swatch = swatchCandidates(work.canvas, it.box, method === 'vlm' ? 0.2 : 0.1); } catch { swatch = null; }
+    if (it.swatchBox || it.box) {
+      try { swatch = swatchCandidates(work.canvas, it.swatchBox || it.box, it.swatchBox ? 0.15 : method === 'vlm' ? 0.2 : 0.1); } catch { swatch = null; }
     }
     const rgb = swatch?.[0] || null;
     return {

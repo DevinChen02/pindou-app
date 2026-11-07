@@ -250,7 +250,8 @@ async function colorsStep(app, p, view) {
   const locked = new Set((board.locks || []).map(([i]) => i));
   const ocrIdx = [];
   for (let i = 0; i < bcells.length; i++) if (bcells[i] && !locked.has(i) && risk.has(board.codes[bcells[i] - 1])) ocrIdx.push(i);
-  const ocrTodo = !board.ocrRead && ocrIdx.length > 0;
+  // 格子里根本没印色号的图纸（只有色块）：逐格读不出东西，反而会把空白当成“没有色号”，不读
+  const ocrTodo = !board.ocrRead && ocrIdx.length > 0 && board.stats?.printed !== false;
   // 每块新认出来的拼豆板自动读一次（停了、退回去再进来不会自己又开始；换了网格会）
   if (ocrTodo && !st.reading && st.autoOcrFor !== board) { st.autoOcrFor = board; startReading(app, p, ocrIdx, [...risk]); }
   const reading = st.reading?.board === board ? st.reading : null;
@@ -277,7 +278,8 @@ async function colorsStep(app, p, view) {
       h('div', h('b', `🙋 核对一下（${nReview} 处）`)),
       h('div.small.muted', { style: { margin: '2px 0 8px' } }, [nr ? `${nr} 种颜色很接近` : '', nu ? `${nu} 个格子没把握` : ''].filter(Boolean).join('、') + '。看放大图回答几个问题，确认几格就能把整板纠正过来。'),
       h('button.btn.soft.su-review-go', { onclick: () => startReview(app, p) }, '开始核对')));
-    if (st.autoReviewFor !== board && !ocrTodo) {
+    // （格子里没印色号的图纸不自动弹出来：只能凭眼睛比颜色，不比按清单色块认的准；想核对可以自己点）
+    if (st.autoReviewFor !== board && !ocrTodo && board.stats?.printed !== false) {
       st.autoReviewFor = board;
       setTimeout(() => { if (st.board === board && st.step === 'colors' && app.pat.page === 'build' && !document.querySelector('.backdrop')) startReview(app, p); }, 350);
     }

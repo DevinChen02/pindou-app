@@ -350,6 +350,7 @@ summary { padding: 8px 0; min-height: 36px; box-sizing: border-box; }
 .check.v { background: var(--ok); color: #fff; }
 .check.p { border: 2px solid var(--line); }
 .check.w { background: var(--warn); color: #fff; }
+@media (prefers-color-scheme: dark) { .check.w { color: #1d1c1a; } }   /* 深色模式的琥珀色比较亮：白字看不清，用深色字 */
 .check.e { background: var(--bad); color: #fff; }
 
 .totals { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -390,6 +391,7 @@ summary { padding: 8px 0; min-height: 36px; box-sizing: border-box; }
 .tile.low .n { color: var(--warn); }
 .tile.none .n { color: var(--muted); font-weight: 500; font-size: 13px; }
 .tile .flag { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%; background: var(--warn); color: #fff; font-size: 11px; font-weight: 800; display: flex; align-items: center; justify-content: center; }
+@media (prefers-color-scheme: dark) { .tile .flag { color: #1d1c1a; } }
 .quick { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 /* 单个颜色：数量 + 加上 / 减去 / 设为（小屏上输入框单独一行，不挤成一小条） */
 .inv-amt { display: grid; grid-template-columns: 1fr repeat(3, auto); gap: 8px; }
@@ -532,7 +534,7 @@ input.color-well::-moz-color-swatch { border: none; border-radius: 10px; }
 .ov-box.warn { border-color: #e39a12; }
 .ov-box.bad { border-color: var(--bad); border-width: 2.5px; }
 .ov-box span { position: absolute; left: -2px; bottom: 100%; margin-bottom: 1px; font-size: 10px; line-height: 13px; font-weight: 700; padding: 0 3px; border-radius: 3px; background: var(--ok); color: #fff; white-space: nowrap; }
-.ov-box.warn span { background: #e39a12; }
+.ov-box.warn span { background: #b06a00; }   /* 小白字：琥珀色要深一点才看得清（对比度 ≥ 4） */
 .ov-box.bad span { background: var(--bad); }
 .ov-box.lb span { bottom: auto; top: 100%; margin: 1px 0 0; }
 .ov-box.ok span { display: none; }

@@ -2,7 +2,7 @@
 //   PP-OCR：PP-OCRv5 mobile（vendor/ppocr + vendor/ort，约 19 MB）——示例图上明显更准，默认
 //   （读拼豆板格子上的色号另外可选 PP-OCRv6 small，见 REC_MODELS）
 //   Tesseract：（vendor/tesseract，约 7 MB）——PP-OCR 加载失败时自动退回
-import { readLegend, refineCodes, mergeReads, wordImage, OCR_ATTEMPTS, plausibleToken, lengthMatches } from './ocr-core.js';
+import { readLegend, refineCodes, mergeReads, locateSwatches, wordImage, OCR_ATTEMPTS, plausibleToken, lengthMatches } from './ocr-core.js';
 import { normalizeCode, ocrWhitelist, CODES, rgbOf, deltaE } from '../palette.js';
 import { getImageData, makeCanvas } from '../image.js';
 
@@ -162,7 +162,8 @@ export async function ocrExtract(settings, canvas, rect, { onStatus, signal } = 
       x1: Math.min(img.width, (wd.x1 + pad) / s), y1: Math.min(img.height, (wd.y1 + pad) / s),
     };
     const r = await P.recognize(img, b, { allow, minW });
-    return { text: r.text.replace(/\s+/g, ''), conf: r.conf * 100 };
+    // 空格先留着：“G14 36”（色号和数量离得近，被当成一个词）要靠它分开；配对时再去掉
+    return { text: r.text.trim().replace(/\s+/g, ' '), conf: r.conf * 100 };
   };
   const tessRead = async (ana, wd) => {
     check();
@@ -210,7 +211,10 @@ export async function ocrExtract(settings, canvas, rect, { onStatus, signal } = 
     }
   }
   const map = b => b && { x0: rect.x + b.x0 / s, y0: rect.y + b.y0 / s, x1: rect.x + b.x1 / s, y1: rect.y + b.y1 / s };
-  const items = pairs.map(p => {
+  // 色块印在文字旁边的清单（“B20 (24) ■”）：每一项的色块在哪（一般的清单是 null，色块就在色号底下）
+  let beside = [];
+  try { beside = locateSwatches(img, pairs, s); } catch (e) { console.warn('找色块失败', e); }
+  const items = pairs.map((p, i) => {
     // 色块区域：色号字周围扩一圈（字在色块中间）
     const cb = map(p.codeBox);
     const h = cb.y1 - cb.y0;
@@ -218,6 +222,7 @@ export async function ocrExtract(settings, canvas, rect, { onStatus, signal } = 
       code: p.code, rawCode: p.rawCode, count: p.count, uncertain: p.uncertain, alts: p.alts,
       box: { x0: cb.x0 - h * 0.5, y0: cb.y0 - h * 0.5, x1: cb.x1 + h * 0.5, y1: cb.y1 + h * 0.5 },
       textBox: cb, countBox: map(p.countBox),
+      swatchBox: beside[i] ? { x0: rect.x + beside[i].x0, y0: rect.y + beside[i].y0, x1: rect.x + beside[i].x1, y1: rect.y + beside[i].y1 } : null,
     };
   });
   const hc = ana.hc / (ana.scale || 1);

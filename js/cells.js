@@ -265,14 +265,19 @@ export function solveCounts(cost, N, K1, target, rho, init = null, skip = null) 
 // ---------- 主流程 ----------
 const labOf = rgb => rgbToLab(rgb);
 
-/** 空格的颜色（可能不止一种：比如棋盘格底纹）：没字/离清单色都远的格子里最常见的一两种颜色 */
-function emptyColors(F, printed, refLab) {
+/**
+ * 空格的颜色（可能不止一种：比如棋盘格底纹）：没字/离清单色都远的格子里最常见的一两种颜色。
+ * maxEmpty：最多能有几个空格（格子总数 − 清单总颗数）。整幅铺满的图纸几乎没有空格：
+ * 某种颜色的格子比这多得多，就不是空格（是哪种豆子的颜色和色卡差得远），不能拿来当空格色
+ */
+function emptyColors(F, printed, refLab, maxEmpty = Infinity) {
   const pool = [];
   for (let i = 0; i < F.N; i++) {
     const l = [F.lab[i * 3], F.lab[i * 3 + 1], F.lab[i * 3 + 2]];
     if (printed ? F.ink[i] <= 0.02 : Math.min(...refLab.map(r => de2000(l, r))) > 8) pool.push(l);
   }
-  if (!pool.length) return [[98, 0, 0]];
+  // 一个空格都没有（整幅铺满）：没有空格色；否则默认白色
+  if (!pool.length) return maxEmpty <= Math.max(5, F.N * 0.01) ? [] : [[98, 0, 0]];
   const bins = new Map();
   for (const l of pool) {
     const k = `${Math.round(l[0] / 3)},${Math.round(l[1] / 3)},${Math.round(l[2] / 3)}`;
@@ -280,7 +285,15 @@ function emptyColors(F, printed, refLab) {
     b.n++; b.s[0] += l[0]; b.s[1] += l[1]; b.s[2] += l[2];
     bins.set(k, b);
   }
-  const top = [...bins.values()].sort((a, b) => b.n - a.n);
+  let top = [...bins.values()].sort((a, b) => b.n - a.n);
+  // （只管几乎铺满的图纸；有不少空格的图纸照旧：白豆和白色空格本来就同色，不能这样排除）
+  if (maxEmpty <= Math.max(5, F.N * 0.01)) {
+    // 一种颜色的格子（压缩噪声会散到好几个小格里，按色差 < 5 整团算）比可能的空格数多得多：不是空格
+    const lim = Math.max(maxEmpty * 1.5, maxEmpty + 5);
+    const mass = c => { let n = 0; for (let i = 0; i < F.N; i++) if (de2000([F.lab[i * 3], F.lab[i * 3 + 1], F.lab[i * 3 + 2]], c) < 5) n++; return n; };
+    top = top.slice(0, 12).filter(b => b.n <= lim && mass(b.s.map(v => v / b.n)) <= lim);
+    if (!top.length) return [];
+  }
   const out = [top[0].s.map(v => v / top[0].n)];
   // 第二种空格颜色：够多、而且和第一种明显不同（棋盘格）
   const second = top.find(b => b.n >= Math.max(5, top[0].n * 0.25) && de2000(b.s.map(v => v / b.n), out[0]) > 3);
@@ -306,7 +319,9 @@ export function classifyFeatures(F, refs, opt = {}) {
   const INK = printed ? 8 : 0;
 
   let refLab = src.map(labOf);
-  let emptyLab = emptyColors(F, printed, refLab);
+  // 清单总数和格子数对得上（整幅铺满）时，空格最多就这么几个；清单总数比格子还多（多半数量读错了）就不管
+  const maxEmpty = total > 0 && total <= N * 1.01 ? Math.max(0, N - total) : Infinity;
+  let emptyLab = emptyColors(F, printed, refLab, maxEmpty);
   // 清单色块的实际颜色：和格子是同一个软件、同一次压缩画出来的，通常和格子颜色一模一样（比色卡标准色 +
   // 校准准得多）。但取色可能取歪（取到字、白底、隔壁色块），所以每个色号给几种候选颜色（r.swatch），
   // 只采用“图上确实有一批格子就是这个颜色、离这个色号的色卡色也不算太远”的那一个；两个色号抢同一个颜色时，
@@ -318,7 +333,8 @@ export function classifyFeatures(F, refs, opt = {}) {
     for (let k = 0; k < K; k++) {
       const cands = refs[k].swatch || [];
       if (!cands.length) continue;
-      const need = Math.max(2, Math.min((target[k + 1] || 0) * 0.3, 40));
+      // 图上要有一批格子是这个颜色才采用（清单只有 1 颗的颜色，图上也只有 1 格）
+      const need = Math.max(Math.min(2, target[k + 1] || 0) || 1, Math.min((target[k + 1] || 0) * 0.3, 40));
       const whiteCode = emptyLab.some(e => de2000(refLab[k], e) < 8);
       let best = null;
       for (const c of cands) {
@@ -456,7 +472,7 @@ export function classifyFeatures(F, refs, opt = {}) {
     for (const [k, ls] of byK) { const med = c => ls.map(l => l[c]).sort((a, b) => a - b)[ls.length >> 1]; refLab[k - 1] = [med(0), med(1), med(2)]; }
   }
   const calLab = refLab.map(l => [...l]);
-  emptyLab = emptyColors(F, printed, refLab);
+  emptyLab = emptyColors(F, printed, refLab, maxEmpty);
   markOutliers();
   fillColor(); inkCost();
   sol = solve();
@@ -632,6 +648,8 @@ export function classifyFeatures(F, refs, opt = {}) {
       printed, exact: codes.length - diff.length, total: codes.length, diff,
       beads: cntArr.reduce((a, b, k) => a + (k ? b : 0), 0), want: total, freeCounts, calibrated, textUsed, outliers: nOut, dewatermarked,
       legendUsed: codes.filter((c, k) => legendLab[k]),
+      // 颜色和空格一样的色号（白豆 vs 白色的空格）：没印色号时只看颜色数不出来，交叉核对时不比
+      emptyLike: printed || !(maxEmpty > Math.max(5, N * 0.01)) ? [] : codes.filter((c, k) => emptyLab.some(e => de2000(refLab[k], e) < 4)),
     },
     suspects,
   };

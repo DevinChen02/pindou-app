@@ -396,6 +396,8 @@ export async function reviewFlow(app, p, { board = p.board, onDone = null } = {}
   const changed = new Set();
   const setLock = (i, code) => { locks.set(i, kOf(code)); changed.add(i); };
 
+  // 格子里没印色号的图纸（只有色块）：只能比颜色，不提“读格子上印的色号”
+  const printed = board.stats?.printed !== false;
   let rv = boardReview(res, { cols, locks });
   let steps = [];
   const buildSteps = () => {
@@ -479,7 +481,7 @@ export async function reviewFlow(app, p, { board = p.board, onDone = null } = {}
     const picked = new Set(pre);
     const cells = r.hunt.filter(i => !locks.has(i) || pre.includes(i));
     clear(body).append(
-      h('p', h('b', `请点出所有写着 ${r.code} 的格子`)),
+      h('p', h('b', printed ? `请点出所有写着 ${r.code} 的格子` : `请点出所有是 ${r.code} 这个颜色的格子`)),
       h('p.small.muted', '这些格子颜色和它很像；点一下选中，再点取消。一个都没有就直接“下一步”。'),
       h('div.rv-grid', cells.map(i => {
         const b = h('button.rv-pick' + (picked.has(i) ? '.on' : ''), { onclick: () => { if (picked.has(i)) picked.delete(i); else picked.add(i); b.classList.toggle('on'); } }, cellCrop(pix.canvas, geo, cols, i, 92));
@@ -495,7 +497,7 @@ export async function reviewFlow(app, p, { board = p.board, onDone = null } = {}
       h('span.small.muted', steps.length ? `${Math.min(at + 1, steps.length)} / ${steps.length}` : ''),
       h('span.small', changed.size ? `已确认 ${changed.size} 格` : ''));
     body.append(head);
-    if (rv.risks.some(r => r.probe.length) && at === 0 && !board.ocrRead) {
+    if (printed && rv.risks.some(r => r.probe.length) && at === 0 && !board.ocrRead) {
       const b = h('button.btn.sm.soft', { onclick: () => autoCheck(b) }, '🤖 先让识字模型自动核对相近色');
       const note = h('div.tiny.muted', '读几格上印的色号来确认');
       import('../extract/ocr.js').then(o => o.downloadMB(o.cellModelOf(app.settings))).then(mb => { if (mb > 0) note.textContent = `读几格上印的色号来确认（第一次要下载约 ${Math.round(mb)} MB 的模型）`; }).catch(() => {});
@@ -523,7 +525,7 @@ export async function reviewFlow(app, p, { board = p.board, onDone = null } = {}
       };
       body.append(
         h('div.rv-card', cellCrop(pix.canvas, geo, cols, i),
-          h('div.grow', h('div.small.muted', why), h('p', h('b', `红框里这一格是 ${r.code} 吗？`)), h('div.tiny.muted', '放大看格子里印的色号'))),
+          h('div.grow', h('div.small.muted', why), h('p', h('b', `红框里这一格是 ${r.code} 吗？`)), h('div.tiny.muted', printed ? '放大看格子里印的色号' : '格子里没印色号：和清单上的色块比一比颜色'))),
         h('div.rv-opts',
           h('button.btn.ok', { onclick: () => { snap(); setLock(i, r.code); at++; render(); } }, `✓ 是 ${r.code}`),
           h('div.small.muted', { style: { marginTop: '10px' } }, '不是的话，它是：'),

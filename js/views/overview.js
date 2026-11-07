@@ -371,7 +371,9 @@ async function crossCheck(app, s, card) {
         for (const r of identityRisks(res)) if (r.reason === 'close') for (const q of r.partners) grp.set(find(q), find(r.code));
         const groups = new Map();
         for (const r of refs) { const g = find(r.code); const e = groups.get(g) || { codes: [], want: 0, free: 0 }; e.codes.push(r.code); e.want += r.count; e.free += free[r.code] || 0; groups.set(g, e); }
-        const rows = [...groups.values()].map(e => ({ code: e.codes.join('/'), codes: e.codes, want: e.want, free: e.free }));
+        // 和空格同色的（白豆、白底空格，格子里又没印色号）：只看颜色数不出来，不比
+        const blank = new Set(res.stats.emptyLike || []);
+        const rows = [...groups.values()].filter(e => !e.codes.every(c => blank.has(c))).map(e => ({ code: e.codes.join('/'), codes: e.codes, want: e.want, free: e.free }));
         out = {
           sig, cols: res.cols, rows: res.rows,
           off: rows.filter(r => Math.abs(r.free - r.want) > Math.max(3, r.want * 0.12)),

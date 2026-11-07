@@ -167,7 +167,32 @@ function lineCov(L, W, axis, pos, cross) {
   return segs ? ok / segs : 0;
 }
 
-function extendGrid(img, xs, ys, R, headerLike) {
+/**
+ * 一条候选的行（或列）里面有没有格线穿过：cross 是和它垂直的那些格线的位置，看每条线在这一段里是不是一条细线
+ * （比左右两边都暗或都亮）。返回有线的比例。
+ */
+function bandLines(L, W, axis, a0, a1, cross) {
+  const d = 3, px = (q, t) => (axis === 'y' ? L[t * W + q] : L[q * W + t]);   // axis='y'：横着的一行，cross 是竖线的 x
+  const t0 = Math.round(a0) + 2, t1 = Math.round(a1) - 2;
+  if (t1 <= t0) return 1;
+  let hit = 0, n = 0;
+  for (const c of cross.slice(1, -1)) {
+    n++;
+    let best = 0;
+    for (let q = c - 1; q <= c + 1; q++) {
+      let k = 0;
+      for (let t = t0; t < t1; t++) {
+        const v = px(q, t), u = px(q - d, t), w = px(q + d, t);
+        if ((v < u - 2.5 && v < w - 2.5) || (v > u + 2.5 && v > w + 2.5)) k++;
+      }
+      best = Math.max(best, k);
+    }
+    if (best >= (t1 - t0) * 0.55) hit++;
+  }
+  return n ? hit / n : 1;
+}
+
+function extendGrid(img, xs, ys, R, headerLike, L, want = 0) {
   const stats0 = sampleCells(img, xs, ys);
   const labOf = st => (st ? rgbToLab(st.rgb) : null);
   // 网格里出现过的颜色（量化成小格，≥2 格才算）
@@ -185,53 +210,73 @@ function extendGrid(img, xs, ys, R, headerLike) {
   const isEmptyColor = l => { const [a, b, c] = emptyKey.split(',').map(Number); return Math.abs(Math.round(l[0] / 4) - a) <= 1 && Math.abs(Math.round(l[1] / 4) - b) <= 1 && Math.abs(Math.round(l[2] / 4) - c) <= 1; };
   const px = (xs[xs.length - 1] - xs[0]) / (xs.length - 1), py = (ys[ys.length - 1] - ys[0]) / (ys.length - 1);
   // 一排候选格子能不能并进来
-  const ok = (cells, labelCells) => {
+  // late：前 3 轮之后还在往外补（只有清单总数还差、格线接着走的才补）
+  let late = false;
+  const ok = (cells, labelCells, band) => {
     if (!cells.length || cells.some(c => !c)) return false;
     if (headerLike(cells)) return false;
     const labs = cells.map(labOf);
-    if (labs.filter(seen).length < cells.length * 0.85) return false;
+    const lines = band ? bandLines(L, img.width, band.axis, band.a0, band.a1, band.cross) : 0;
+    // 格线在这里断了：网格里格线清清楚楚（挨着的那一排几乎每条都看得到），新的这一排里却几乎没有——
+    // 是网格外面的东西（截图里看图软件的黑底、纯色边框、下面清单的色块），不是一排豆子
+    // （格线本来就很浅、看不出来的图纸不受影响）
+    if (band && lines < 0.3 && bandLines(L, img.width, band.axis, band.r0, band.r1, band.cross) >= 0.6) return false;
+    // 清单的总颗数还差这么多格、格线也一格一格接着走：照样是网格。
+    // （格线在深色豆子上看不清、没找全时，下半截的颜色可能是网格里还没出现过的，比如只有下面才有的深色衣服）
+    const total = (xs.length - 1) * (ys.length - 1) + cells.length;
+    const room = !!(want && band && total <= want * 1.005 && lines >= 0.5);
+    if (late) return room;
+    if (labs.filter(seen).length < cells.length * 0.85 && !room) return false;
     const hasBead = labs.some(l => !isEmptyColor(l));
     // 编号栏在继续：外侧那一格有字，而且和上一排外侧那格颜色一样
     const [lab, prev] = labelCells;
     // （编号是很细的一位数“1”时字太少，看不出“有字”：编号栏是一条和空格不同色的底，颜色接得上也算）
     const labelled = lab && prev && (lab.ink > 0.04 || !isEmptyColor(labOf(lab))) && dLab(labOf(lab), labOf(prev)) < 8;
-    return hasBead || labelled;
+    if (hasBead || labelled) return true;
+    // 整排都是“空格色”（最多的那种颜色，比如白）：一般是网格外的空白；但如果清单的总颗数正好还差这一排、
+    // 格线也一格一格穿过它，就是一排真的白豆子（整幅图铺满、边上一圈是白色的图纸）
+    return room && lines >= 0.6;
   };
   const cellAt = (x0, y0, x1, y1) => sampleCells(img, [x0, x1], [y0, y1])[0];
   // 编号栏那一格：贴着图边、只露出一大半也算（有的图纸行号那一列被图边切掉了一点）
   const lx = Math.round(xs[0] - px), ly = Math.round(ys[0] - py);
   const labX = lx >= 0 ? lx : xs[0] >= px * 0.6 ? 0 : null, labY = ly >= 0 ? ly : ys[0] >= py * 0.6 ? 0 : null;
-  for (let guard = 0; guard < 3; guard++) {
+  for (let guard = 0; guard < (want ? 200 : 3); guard++) {
+    late = guard >= 3;
     let changed = false;
     // 下
-    const yb = Math.round(ys[ys.length - 1] + py);
+    let yb = Math.round(ys[ys.length - 1] + py);
+    if (yb >= img.height && yb - (img.height - 1) <= py * 0.2) yb = img.height - 1;   // 网格最外那条线就是图边
     if (yb <= R.ry1 + 2 && yb < img.height) {
       const y0 = ys[ys.length - 1];
       const cells = sampleCells(img, xs, [y0, yb]);
       const lab = labX != null ? [cellAt(labX, y0, xs[0], yb), cellAt(labX, ys[ys.length - 2], xs[0], y0)] : [];
-      if (ok(cells, lab)) { ys = [...ys, yb]; changed = true; }
+      if (ok(cells, lab, { axis: 'y', a0: y0, a1: yb, cross: xs, r0: ys[ys.length - 2], r1: y0 })) { ys = [...ys, yb]; changed = true; }
     }
     // 上
-    const yt = Math.round(ys[0] - py);
+    let yt = Math.round(ys[0] - py);
+    if (yt < 0 && yt >= -py * 0.2) yt = 0;
     if (yt >= R.ry0 - 2 && yt >= 0) {
       const cells = sampleCells(img, xs, [yt, ys[0]]);
       const lab = labX != null ? [cellAt(labX, yt, xs[0], ys[0]), cellAt(labX, ys[0], xs[0], ys[1])] : [];
-      if (ok(cells, lab)) { ys = [yt, ...ys]; changed = true; }
+      if (ok(cells, lab, { axis: 'y', a0: yt, a1: ys[0], cross: xs, r0: ys[0], r1: ys[1] })) { ys = [yt, ...ys]; changed = true; }
     }
     // 右
-    const xr = Math.round(xs[xs.length - 1] + px);
+    let xr = Math.round(xs[xs.length - 1] + px);
+    if (xr >= img.width && xr - (img.width - 1) <= px * 0.2) xr = img.width - 1;
     if (xr <= R.rx1 + 2 && xr < img.width) {
       const x0 = xs[xs.length - 1];
       const cells = sampleCells(img, [x0, xr], ys);
       const lab = labY != null ? [cellAt(x0, labY, xr, ys[0]), cellAt(xs[xs.length - 2], labY, x0, ys[0])] : [];
-      if (ok(cells, lab)) { xs = [...xs, xr]; changed = true; }
+      if (ok(cells, lab, { axis: 'x', a0: x0, a1: xr, cross: ys, r0: xs[xs.length - 2], r1: x0 })) { xs = [...xs, xr]; changed = true; }
     }
     // 左
-    const xl = Math.round(xs[0] - px);
+    let xl = Math.round(xs[0] - px);
+    if (xl < 0 && xl >= -px * 0.2) xl = 0;
     if (xl >= R.rx0 - 2 && xl >= 0) {
       const cells = sampleCells(img, [xl, xs[0]], ys);
       const lab = labY != null ? [cellAt(xl, labY, xs[0], ys[0]), cellAt(xs[0], labY, xs[1], ys[0])] : [];
-      if (ok(cells, lab)) { xs = [xl, ...xs]; changed = true; }
+      if (ok(cells, lab, { axis: 'x', a0: xl, a1: xs[0], cross: ys, r0: xs[0], r1: xs[1] })) { xs = [xl, ...xs]; changed = true; }
     }
     if (!changed) break;
   }
@@ -365,11 +410,19 @@ export function digitize(img, opts) {
   const x0 = Math.max(0, R.x - 3 * p), y0 = Math.max(0, R.y - 3 * p);
   const x1 = Math.min(W, R.x + R.w + 3 * p), y1 = Math.min(H, R.y + R.h + 3 * p);
   if (x0 >= R.x && y0 >= R.y && x1 <= R.x + R.w && y1 <= R.y + R.h) return res;
+  const better = (a, b) => {
+    if (b.error) return false;
+    const grew = b.rows >= a.rows && b.cols >= a.cols;
+    return grew && Math.abs((b.stats?.beads ?? 0) - want) < Math.abs((a.stats?.beads ?? 0) - want) * 0.5;
+  };
   const r2 = digitizeOnce(img, { ...opts, region: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } });
-  if (r2.error) return res;
-  const grew = r2.rows >= res.rows && r2.cols >= res.cols;
-  const d1 = Math.abs(beads - want), d2 = Math.abs((r2.stats?.beads ?? 0) - want);
-  return grew && d2 < d1 * 0.5 ? { ...r2, geom: { ...r2.geom, extended: true } } : res;
+  let best = better(res, r2) ? { ...r2, geom: { ...r2.geom, extended: true } } : res;
+  // 还差很多（自动猜的清单位置压进了网格里——比如图比较小、下半截是深色、格线在上面看不清）：整张图找一次
+  if ((best.stats?.beads ?? 0) < want * 0.9 && (R.x > 0 || R.y > 0 || R.x + R.w < W || R.y + R.h < H)) {
+    const r3 = digitizeOnce(img, { ...opts, region: { x: 0, y: 0, w: W, h: H } });
+    if (better(best, r3)) best = { ...r3, geom: { ...r3.geom, extended: true } };
+  }
+  return best;
 }
 
 /**
@@ -528,7 +581,7 @@ function digitizeOnce(img, { region, refs, locks = null, dewatermark = false }) 
   // 往外补格子：两头的格线太浅没找到（最后一两行全是空格、下面紧挨着编号栏等）。
   // 补的条件：新的一排格子颜色都是网格里已有的颜色、不像编号栏，而且
   // 旁边的编号栏还在继续（有行号/列号），或者这一排里有豆子
-  ({ xs, ys } = extendGrid(img, xs, ys, { rx0, ry0, rx1, ry1 }, headerLike));
+  ({ xs, ys } = extendGrid(img, xs, ys, { rx0, ry0, rx1, ry1 }, headerLike, L, (refs || []).reduce((a, r) => a + (r.count || 0), 0)));
   rows = ys.length - 1; cols = xs.length - 1;
 
   const res = classifyGrid(img, xs, ys, refs, { locks, dewatermark });
