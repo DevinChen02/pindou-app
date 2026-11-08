@@ -13,7 +13,8 @@ import { gridFromCorners, boardRecord, locksFor, unpackCells } from '../board.js
 import { runBoard } from '../boardasync.js';
 import { createPanZoom } from '../panzoom.js';
 import { openImageViewer, entriesFromImages } from '../viewer.js';
-import { loadPixels, gridRegion, drawBoard, boardSize, merged, reviewFlow, reviewCount, placeOf } from './build.js';
+import { loadPixels, gridRegion, drawBoard, boardSize, merged, reviewFlow, reviewCount, placeOf, erasedOf } from './build.js';
+import { eraseFlow, canErase } from './erase.js';
 import { goPattern } from './patterns.js';
 import { isGenerated } from './photo.js';
 
@@ -181,7 +182,10 @@ async function ensureBoard(app, p, view) {
     let res = await runBoard('digitize', st.pix.data, { region, refs, locks: keep ? locksFor(keep, refs) : null, dewatermark });
     if (!res.error && keep && (res.rows !== keep.rows || res.cols !== keep.cols)) res = await runBoard('digitize', st.pix.data, { region, refs, dewatermark });
     if (res.error) st.gridError = res.error;
-    else st.board = boardRecord(res, st.im.fullId, { auto: true, dewatermark }, keep && res.rows === keep.rows && res.cols === keep.cols ? locksFor(keep, refs) : null);
+    else {
+      const same = keep && res.rows === keep.rows && res.cols === keep.cols;
+      st.board = boardRecord(res, st.im.fullId, { auto: true, dewatermark, ...(same ? erasedOf(keep) : {}) }, same ? locksFor(keep, refs) : null);
+    }
   } catch (e) { st.gridError = e.message; }
   wait.remove();
   return app.pat.page === 'build' && st.step === step;
@@ -205,7 +209,8 @@ async function gridStep(app, p, view) {
       h('div.row.between', h('span.small.muted', '有豆子的范围'), h('b', `${b.h} 行 × ${b.w} 列`)),
       h('div.row.between', h('span.small.muted', '豆子'), h('b', `${fmtNum(beads)} 颗`, want ? h('span.small.muted', `（清单 ${fmtNum(want)}）`) : null))));
     if (want && Math.abs(beads - want) > Math.max(3, want * 0.03)) {
-      view.append(h('div.banner.warn', h('span.ico', '⚠️'), h('div', h('b', '颗数和清单差得比较多'), h('div.small', '看看红线是不是正好框住了所有格子；不对的话“手动校准”。'))));
+      view.append(h('div.banner.warn', h('span.ico', '⚠️'), h('div', h('b', '颗数和清单差得比较多'), h('div.small', '看看红线是不是正好框住了所有格子；不对的话“手动校准”。',
+        beads > want && canErase(p, st.board) ? '图上画了大水印、签名的话，它们常被认成豆子：下一步“核对颜色”里可以把它圈掉。' : ''))));
     }
   }
   view.append(
@@ -281,7 +286,7 @@ async function colorsStep(app, p, view) {
     // （格子里没印色号的图纸不自动弹出来：只能凭眼睛比颜色，不比按清单色块认的准；想核对可以自己点）
     if (st.autoReviewFor !== board && !ocrTodo && board.stats?.printed !== false) {
       st.autoReviewFor = board;
-      setTimeout(() => { if (st.board === board && st.step === 'colors' && app.pat.page === 'build' && !document.querySelector('.backdrop')) startReview(app, p); }, 350);
+      setTimeout(() => { if (st.board === board && st.step === 'colors' && app.pat.page === 'build' && !document.querySelector('.backdrop, .pz')) startReview(app, p); }, 350);
     }
   }
   if (!off.length && !ocrTodo && !reading && !nReview) view.append(h('div.banner.ok.su-allok', h('span.ico', '✓'), h('div.small', '颜色都认好了，没有没把握的地方')));
@@ -311,6 +316,19 @@ async function colorsStep(app, p, view) {
     h('div.grow', h('b', '去水印'), h('div.tiny.muted', '被水印、半透明文字盖住的格子也认得准')),
     dw ? h('button.btn.sm.soft', { onclick: e => { e.preventDefault(); showClean(app, p); } }, '看效果') : null));
 
+  // 画上去的大水印、签名、涂鸦（去水印去不掉的）：圈出来整块清空
+  if (canErase(p, board)) {
+    const ne = board.erased?.length || 0;
+    // 豆子比清单多不少、格数又对不上：多半是画上去的水印被认成了豆子，提醒一下
+    const extra = (board.stats?.beads ?? 0) - refs.reduce((a, r) => a + r.count, 0);
+    const suspect = !ne && extra > Math.max(3, refs.reduce((a, r) => a + r.count, 0) * 0.01) && off.some(r => r.big);
+    view.append(h('div.su-dw.su-erase' + (suspect ? '.suspect' : ''),
+      h('span.su-erase-ico', '⭕'),
+      h('div.grow', h('b', '圈掉水印'), h('div.tiny' + (suspect ? '.warn-t' : '.muted'), ne ? `已圈掉 ${fmtNum(ne)} 格（锁定成空格）`
+        : suspect ? `豆子比清单多 ${fmtNum(extra)} 颗：图上画的大水印、签名常被认成豆子，圈出来整块清空` : '图上画了大水印、签名、涂鸦？圈出来，整块清空')),
+      h('button.btn.sm.soft.su-erase-go', { disabled: !!reading, onclick: () => startErase(app, p) }, ne ? '再圈' : '圈出来')));
+  }
+
   view.append(footer(reading
     ? h('button.btn.primary.block.big', { disabled: true }, '正在读色号…（可以点“停止”）')
     : h('button.btn.primary.block.big', { onclick: () => { st.step = 'peg'; app.rerender(); } }, '下一步：选拼豆板尺寸')));
@@ -332,6 +350,22 @@ function startReview(app, p) {
   });
 }
 
+/** 圈掉水印：圈完直接换成新的拼豆板（还没存，到“完成，开始拼豆”才存） */
+function startErase(app, p) {
+  const board = st.board;
+  eraseFlow(app, p, {
+    board, pix: st.pix && st.im?.fullId === board.imageId ? st.pix : null,
+    onDone: rec => {
+      if (st.board !== board || app.pat.page !== 'build') return;
+      st.board = rec; st.clean = null;
+      // 只是把圈掉的格子锁成空、重新算：停掉的读色号、看过的核对不会因此又自己开始
+      if (st.autoOcrFor === board) st.autoOcrFor = st.board;
+      if (st.autoReviewFor === board) st.autoReviewFor = st.board;
+      app.rerender();
+    },
+  });
+}
+
 /** 网格不变，重新认颜色（换了去水印开关、点了色块之后）。锁定的格子（核对过的、读字读得准的）照旧 */
 async function reclassify(app, p) {
   const board = st.board;
@@ -346,7 +380,7 @@ async function reclassify(app, p) {
     const res = await runBoard('classify', st.pix.data, { xs, ys, refs, opt: { locks, dewatermark, ocr: ocrOpt(board, refs) } });
     res.rows = board.rows; res.cols = board.cols;
     if (st.board !== board) return;
-    st.board = boardRecord({ ...res, geom: { xs, ys } }, board.imageId, { auto: board.auto, manual: board.manual, dewatermark, ocrRead: board.ocrRead || 0, ocr: board.ocr || null, reviewedAt: board.reviewedAt || null }, locks);
+    st.board = boardRecord({ ...res, geom: { xs, ys } }, board.imageId, { auto: board.auto, manual: board.manual, dewatermark, ocrRead: board.ocrRead || 0, ocr: board.ocr || null, reviewedAt: board.reviewedAt || null, ...erasedOf(board) }, locks);
     // 只是重新认颜色：不再自动读色号 / 自动弹出核对（该做的已经做过，或者用户跳过了）
     if (st.autoOcrFor === board) st.autoOcrFor = st.board;
     if (st.autoReviewFor === board) st.autoReviewFor = st.board;
@@ -423,7 +457,7 @@ function startReading(app, p, idx, codes) {
       }
       if (st.reading === R) st.reading = null;
       if (app.pat.page !== 'build' || st.board !== board) return; // 期间换了网格
-      st.board = boardRecord({ ...res, geom: { xs, ys } }, board.imageId, { auto: board.auto, manual: board.manual, dewatermark: !!board.dewatermark, ocrRead: done, ocr: packOcr(scores, idx, lex) }, locks.size ? locks : null);
+      st.board = boardRecord({ ...res, geom: { xs, ys } }, board.imageId, { auto: board.auto, manual: board.manual, dewatermark: !!board.dewatermark, ocrRead: done, ocr: packOcr(scores, idx, lex), ...erasedOf(board) }, locks.size ? locks : null);
       st.clean = null;
       toast(`读了 ${fmtNum(done)} 格色号${changed ? `，${changed} 格改了颜色` : '，颜色都没变'}`, 'ok');
       if (st.step === 'colors') app.rerender();

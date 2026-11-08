@@ -7,6 +7,7 @@ import { openImageViewer, entriesFromImages } from '../viewer.js';
 import { renderRecognize, savedBanner } from './recognize.js';
 import { isGenerated, regenerate } from './photo.js';
 import { renderBuild } from './build.js';
+import { replaceFlow, undoReplaceButton } from './replace.js';
 
 // q：搜索词；status：状态筛选；tags：选中的分类（同时满足）；select：多选模式下选中的图纸 id
 const ui = { q: '', status: 'all', tags: new Set(), select: null, copies: new Map(), filter: 'all', open: null };
@@ -281,7 +282,7 @@ async function renderDetail(app) {
     else view.append(h('div.banner.ok', h('span.ico', '✅'), h('div', h('b', '全部够用'), h('div.small', '拼完后所有颜色都还在补货线以上。'))));
     view.append(h('div.table-wrap', h('table.ptable',
       h('thead', h('tr', h('th', '颜色'), h('th', '需要'), h('th', '现有'), h('th', '拼后'))),
-      h('tbody', rows.map(r => h('tr.' + r.status,
+      h('tbody', rows.map(r => h('tr.' + r.status + (app.readOnly ? '' : '.pd-click'), { 'data-code': r.code, onclick: app.readOnly ? null : () => colorActions(app, p, r) },
         h('td', chip(r.code, { size: 'sm' })),
         h('td', fmtNum(r.left)),
         h('td', fmtNum(r.stock)),
@@ -289,7 +290,8 @@ async function renderDetail(app) {
     const diff = store.boardListDiff(p);
     view.append(h('p.small.muted',
       store.usesBoard(p) ? `照着拼豆板拼：“需要”按拼豆板上的豆子算${diff.length ? `（${diff.length} 种颜色和清单不一样：${diff.slice(0, 4).map(d => `${d.code} 清单 ${fmtNum(d.list)} · 板上 ${fmtNum(d.board)}`).join('，')}${diff.length > 4 ? '…' : ''}）` : ''}，扣库存也按它。` : '',
-      Number(settings.lossPercent) > 0 ? `“需要”已按损耗 ${settings.lossPercent}% 向上取整。` : '', p.build?.deducted && Object.keys(p.build.deducted).length ? '已经扣过的部分不再算。' : ''));
+      Number(settings.lossPercent) > 0 ? `“需要”已按损耗 ${settings.lossPercent}% 向上取整。` : '', p.build?.deducted && Object.keys(p.build.deducted).length ? '已经扣过的部分不再算。' : '',
+      app.readOnly ? '' : '点一行可以把这个颜色整种换掉（比如缺货时换成别的颜色）。'));
     if (short.length || low.length) {
       view.append(h('button.btn.block', { onclick: () => copyText([
         ...short.map(r => `${r.code}：缺 ${-r.after} 颗（需要 ${r.left}，现有 ${r.stock}）`),
@@ -315,6 +317,8 @@ function moreSheet(app, p) {
     isGenerated(p)
       ? h('button.pd-regen', { onclick: () => { s.close(); regenerate(app, p); } }, '🎨 重新生成（换尺寸、颜色）')
       : h('button', { onclick: () => { s.close(); editItems(app, p); } }, '🎨 修改颜色和数量'),
+    p.status !== 'done' ? h('button.pd-replace', { onclick: () => { s.close(); replaceFlow(app, p, { onChanged: () => app.rerender() }); } }, '🎨 整种换颜色（同一种颜色全部换掉）') : null,
+    undoReplaceButton(p, { close: () => s.close(), onChanged: () => app.rerender() }),
     p.images?.some(im => im.fullId) ? h('button', { onclick: () => { s.close(); viewPattern(p); } }, '🖼 看原图') : null,
     h('button', { onclick: () => { s.close(); again(app, p); } }, '🔁 复制一份（再拼一次）'),
     h('button.danger', {
@@ -326,6 +330,15 @@ function moreSheet(app, p) {
         app.pat.page = 'list'; app.render();
       },
     }, '🗑 删除图纸')), { title: p.name });
+}
+
+/** 库存对照里点一种颜色：整种换成别的颜色 */
+function colorActions(app, p, r) {
+  const s = sheet([
+    h('div.row.gap.pd-ca-head', chip(r.code), h('div.small', `需要 ${fmtNum(r.left)} 颗 · 现有 ${fmtNum(r.stock)}`, r.after < 0 ? h('span.bad-t', ` · 缺 ${fmtNum(-r.after)}`) : null)),
+    h('div.menu', { style: { marginTop: '6px' } },
+      h('button.pd-ca-replace', { onclick: () => { s.close(); replaceFlow(app, p, { from: r.code, onChanged: () => app.rerender() }); } }, `🎨 所有 ${r.code} 都换成别的颜色…`)),
+  ], { title: r.code });
 }
 
 async function renameSheet(app, p) {

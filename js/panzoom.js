@@ -11,8 +11,11 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
  *   doubleTap=3         双击放大到“适合”的几倍
  *   inset()             叠在画面上的按钮占掉的边（{ top, right, bottom, left }，屏幕像素）：
  *                       “适合”时内容放在让开它们的地方，拖动时内容的边也能拖到它们外面（不会被按钮永远挡住）
+ *   draw                画线模式（圈水印用）：{ active(), start(pt), move(pt), end(pt), cancel() }，pt 是内容坐标。
+ *                       active() 为真时一根手指（或鼠标）画线，不拖动；画的时候第二根手指按下来 → 这一笔作废，
+ *                       改成两指缩放 / 移动（和平时一样）
  */
-export function createPanZoom(stage, layer, { onTap = null, onChange = null, maxFit = 10, maxAbs = 4, doubleTap = 3, inset = null } = {}) {
+export function createPanZoom(stage, layer, { onTap = null, onChange = null, maxFit = 10, maxAbs = 4, doubleTap = 3, inset = null, draw = null } = {}) {
   const st = { s: 1, tx: 0, ty: 0, w: 1, h: 1, fit: 1, min: 0.1, max: 4, ready: false };
   const size = () => ({ sw: stage.clientWidth || window.innerWidth, sh: stage.clientHeight || window.innerHeight });
   /** 能看清内容的区域（让开叠在上面的按钮） */
@@ -77,6 +80,7 @@ export function createPanZoom(stage, layer, { onTap = null, onChange = null, max
   // ---- 手势：Pointer Events（iPhone Safari 13+ 支持） ----
   const pts = new Map();
   let g = null, moved = false, multi = false, lastTap = { t: 0, x: 0, y: 0 }, tapTimer = null;
+  let stroke = null; // 正在画的一笔：{ id }
   const pos = e => { const r = stage.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
   const mid = p => (p.length > 1 ? { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 } : p[0]);
   const dist = p => Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
@@ -93,12 +97,29 @@ export function createPanZoom(stage, layer, { onTap = null, onChange = null, max
     if (e.target?.closest?.('button, a, input, textarea, select')) return;
     try { stage.setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
     if (!pts.size) { moved = false; multi = false; }
+    stage.dispatchEvent(new CustomEvent('pz-touch'));
+    // 画线模式：第一根手指开始画（鼠标只认左键）
+    if (draw && !pts.size && draw.active() && !(e.pointerType === 'mouse' && e.button !== 0)) {
+      pts.set(e.pointerId, pos(e));
+      stroke = { id: e.pointerId };
+      moved = true; // 画完不算单击
+      const p = pos(e);
+      draw.start(api.toContent(p.x, p.y));
+      return;
+    }
+    // 画着画着第二根手指按下来：这一笔不要了，两指缩放 / 移动
+    if (stroke) { stroke = null; draw.cancel(); }
     pts.set(e.pointerId, pos(e));
     if (pts.size > 1) multi = true;
-    stage.dispatchEvent(new CustomEvent('pz-touch'));
     begin();
   });
   stage.addEventListener('pointermove', e => {
+    if (stroke && e.pointerId === stroke.id) {
+      const p = pos(e);
+      pts.set(e.pointerId, p);
+      draw.move(api.toContent(p.x, p.y));
+      return;
+    }
     if (!pts.has(e.pointerId) || !g) return;
     pts.set(e.pointerId, pos(e));
     const p = [...pts.values()];
@@ -114,6 +135,12 @@ export function createPanZoom(stage, layer, { onTap = null, onChange = null, max
     if (!pts.has(e.pointerId)) return;
     const p = pts.get(e.pointerId);
     pts.delete(e.pointerId);
+    if (stroke && e.pointerId === stroke.id) {
+      stroke = null;
+      if (e.type === 'pointercancel') draw.cancel(); else draw.end(api.toContent(p.x, p.y));
+      begin();
+      return;
+    }
     begin();
     if (pts.size || moved || multi) return;
     const now = Date.now();

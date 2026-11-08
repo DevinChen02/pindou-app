@@ -43,6 +43,18 @@ export function toast(msg, kind = '') {
   setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, kind === 'error' ? 4200 : 2400);
 }
 
+/** 带“撤销”按钮的提示（几秒后自己消失）。点了撤销调 onUndo */
+export function undoToast(msg, onUndo, { ms = 7000, label = '撤销' } = {}) {
+  document.querySelectorAll('.toast.undo').forEach(x => x.remove());
+  let gone = false;
+  const hide = () => { if (gone) return; gone = true; el.classList.remove('show'); setTimeout(() => el.remove(), 300); };
+  const el = h('div.toast.ok.undo', h('span', msg), h('button.toast-undo', { onclick: () => { hide(); onUndo(); } }, label));
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(hide, ms);
+  return hide;
+}
+
 /** 底部弹层。返回 { el, close } */
 export function sheet(content, { title, onClose, tall = false } = {}) {
   const panel = h('div.sheet' + (tall ? '.tall' : ''),
@@ -122,8 +134,11 @@ export function chip(code, { size = 'md', label = code, rgb } = {}) {
   return h('span.chip.' + size, { style: { background: bg, color: fg } }, label ?? '?');
 }
 
-/** 色号选择器（按系列分页 + 直接输入 + 按颜色推荐） */
-export function pickCode({ current, suggestions = [], title = '选择色号' } = {}) {
+/**
+ * 色号选择器（按系列分页 + 直接输入 + 按颜色推荐）。
+ * groups：[{ label, codes }] 放在最上面的几组（给了就不用 suggestions 那一组）；sub(code)：组里每个颜色下面的小字（比如库存）
+ */
+export function pickCode({ current, suggestions = [], title = '选择色号', groups = null, sub = null } = {}) {
   return new Promise(resolve => {
     let series = isCode(current) ? PALETTE.get(current).series : SERIES[0];
     const grid = h('div.code-grid');
@@ -146,9 +161,10 @@ export function pickCode({ current, suggestions = [], title = '选择色号' } =
       }
     };
     const sug = suggestions.filter(isCode);
+    const tops = (groups || [{ label: '按图中色块颜色推荐：', codes: sug }]).map(g => ({ ...g, codes: g.codes.filter(isCode) })).filter(g => g.codes.length);
     const s = sheet([
-      sug.length ? h('div.sug', h('div.muted.small', '按图中色块颜色推荐：'),
-        h('div.row.wrap.gap', sug.map(c => h('button.code-cell', { onclick: () => s.close(c) }, chip(c, { size: 'sm' }))))) : null,
+      ...tops.map(g => h('div.sug', h('div.muted.small', g.label),
+        h('div.row.wrap.gap', g.codes.map(c => h('button.code-cell' + (sub ? '.has-sub' : ''), { 'data-code': c, onclick: () => s.close(c) }, chip(c, { size: 'sm' }), sub ? h('span.code-sub', sub(c)) : null))))),
       h('div.row.gap', input, h('button.btn.primary', {
         onclick: () => {
           const c = normalizeCode(input.value);

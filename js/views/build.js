@@ -15,6 +15,8 @@ import { renderSetup, startSetup, setupActive } from './boardsetup.js';
 import { ipadSheet, sentToIpad, scanProgress } from './ipad-send.js';
 import { readOnlyText } from '../license.js';
 import { isGenerated, regenerate } from './photo.js';
+import { eraseFlow, canErase } from './erase.js';
+import { replaceFlow, undoReplaceButton } from './replace.js';
 
 // 别的页面（准备拼豆板、测试）从这里拿画拼豆板的函数
 export { placeOf, guideStart, guideLines, cellNum, cellWhere, boardSize, drawBoard, orderItems, BUILD_ORDERS, BUILD_SHOWS } from '../boardview.js';
@@ -73,7 +75,7 @@ export function gridRegion(im, canvas) {
 }
 
 /** 拼豆板在原图上的格线（旧记录只存了四角：按等分补出来） */
-function geomOf(board) {
+export function geomOf(board) {
   const g = board.geom || {};
   if (g.xs?.length === board.cols + 1 && g.ys?.length === board.rows + 1) return { xs: g.xs, ys: g.ys };
   return {
@@ -81,6 +83,9 @@ function geomOf(board) {
     ys: Array.from({ length: board.rows + 1 }, (_, i) => Math.round(g.y0 + (g.y1 - g.y0) * i / board.rows)),
   };
 }
+
+/** 圈掉水印圈掉的格子（重新计算拼豆板时带上：下次进“圈掉水印”还显示着） */
+export const erasedOf = board => (board?.erased?.length ? { erased: board.erased } : {});
 
 /** 有多少处建议核对（相近色 + 没把握的格子） */
 export function reviewCount(board) {
@@ -254,7 +259,10 @@ function editPanel(app, p, board) {
         h('div.small.muted.bd-edit-now', '现在是 ', curCode ? chip(curCode, { size: 'sm' }) : h('span.chip.sm.empty', '空'), ' 改成：'))),
     h('div.code-grid.bd-edit-codes',
       codes.map(code => h('button.code-cell' + (code === curCode ? '.on' : ''), { 'data-code': code, onclick: () => setCell(app, p, board, i, code, where) }, chip(code, { size: 'sm' }))),
-      h('button.code-cell' + (!cur ? '.on' : ''), { 'data-code': '', onclick: () => setCell(app, p, board, i, null, where) }, h('span.chip.sm.empty', '空'))));
+      h('button.code-cell' + (!cur ? '.on' : ''), { 'data-code': '', onclick: () => setCell(app, p, board, i, null, where) }, h('span.chip.sm.empty', '空'))),
+    curCode && p.status !== 'done' ? h('button.btn.sm.soft.bd-edit-all', {
+      onclick: () => replaceFlow(app, p, { from: curCode, onChanged: () => app.rerender() }),
+    }, `🔁 所有 ${curCode} 都换成别的颜色…`) : null);
   return panel;
 }
 
@@ -279,13 +287,7 @@ async function setCell(app, p, board, i, code, where) {
 }
 
 /** 生成的图纸：按拼豆板上的颗数重写清单（顺序按原来的，新出现的颜色加在后面，没有了的去掉） */
-export function syncedItems(items, board) {
-  const cnt = store.boardBeadCounts(board);
-  const out = [];
-  for (const it of items) if (cnt.has(it.code) && !out.some(o => o.code === it.code)) out.push({ ...it, count: cnt.get(it.code) });
-  for (const [code, n] of cnt) if (!out.some(o => o.code === code)) out.push({ code, count: n });
-  return out;
-}
+export const syncedItems = (items, board) => store.syncedItemsOf(items, board);
 
 // ---------- 菜单 ----------
 
@@ -310,7 +312,10 @@ function menu(app, p) {
     hasBoard ? h('button', { onclick: () => { s.close(); ipadSheet(app, p, buildItems(p, app.settings)); } }, '📲 在 iPad 上拼（扫码）') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); bs.edit = !bs.edit; bs.editCell = null; app.rerender(); } }, bs.edit ? '✏️ 退出修正模式' : '✏️ 修正格子颜色') : null,
     hasBoard && hasImg && !gen ? h('button', { onclick: () => { s.close(); reviewFlow(app, p); } }, '🔍 核对拼豆板（相近色、没把握的格子）') : null,
+    hasBoard && canErase(p) ? h('button.bd-erase', { onclick: () => { s.close(); eraseFlow(app, p); } }, '⭕ 圈掉水印 / 涂鸦（整块清空）') : null,
     hasBoard && !gen ? h('button', { onclick: () => { s.close(); compareSheet(p); } }, '📊 拼豆板和清单对一对') : null,
+    p.status !== 'done' ? h('button.bd-replace', { onclick: () => { s.close(); replaceFlow(app, p, { onChanged: () => app.rerender() }); } }, '🔁 整种换颜色（同一种颜色全部换掉）') : null,
+    undoReplaceButton(p, { close: () => s.close(), onChanged: () => app.rerender() }),
     hasBoard ? h('button', { onclick: () => { s.close(); toggleMirror(app, p); } }, p.board.place?.mirror ? '⇋ 取消镜像' : '⇋ 镜像（左右翻转）') : null,
     hasBoard ? h('button', { onclick: () => { s.close(); startSetup(p, 'peg'); app.rerender(); } }, '📏 换拼豆板尺寸 / 调整位置') : null,
     hasImg && !gen ? h('button', {
@@ -436,7 +441,7 @@ export async function reviewFlow(app, p, { board = p.board, onDone = null } = {}
   const finish = async () => {
     clear(body).append(h('div.bd-wait', h('div.spinner'), h('p.small.muted', '按你确认的格子重新计算整板…')));
     await run();
-    const rec = boardRecord({ ...res, geom: geo }, board.imageId, { auto: board.auto, manual: board.manual, reviewedAt: Date.now(), edits: board.edits || 0, place: board.place || null, dewatermark: !!board.dewatermark, ocrRead: board.ocrRead || 0, ocr: board.ocr || null }, locks);
+    const rec = boardRecord({ ...res, geom: geo }, board.imageId, { auto: board.auto, manual: board.manual, reviewedAt: Date.now(), edits: board.edits || 0, place: board.place || null, dewatermark: !!board.dewatermark, ocrRead: board.ocrRead || 0, ocr: board.ocr || null, ...erasedOf(board) }, locks);
     const before = unpackCells(board.cells);
     let diff = 0;
     for (let i = 0; i < res.cells.length; i++) {

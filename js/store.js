@@ -386,6 +386,145 @@ export async function setDoneColors(id, codes) {
   });
 }
 
+/** 生成的图纸：按拼豆板上的颗数重写清单（顺序按原来的，新出现的颜色加在后面，没有了的去掉） */
+export function syncedItemsOf(items, board) {
+  const cnt = boardBeadCounts(board);
+  const out = [];
+  for (const it of items) if (cnt.has(it.code) && !out.some(o => o.code === it.code)) out.push({ ...it, count: cnt.get(it.code) });
+  for (const [code, n] of cnt) if (!out.some(o => o.code === code)) out.push({ code, count: n });
+  return out;
+}
+
+/** 这个颜色在拼的时候碰过没有（打了“拼好”的勾，或者扣过库存）：碰过的不能整种换 */
+export function colorTouched(p, code) {
+  const b = p?.build;
+  return !!(b && ((b.done || []).includes(code) || (b.deducted?.[code] || 0) > 0));
+}
+
+/** 图纸里有没有这个颜色（清单上，或者拼豆板上有格子） */
+export function patternHasCode(p, code) {
+  return p.items.some(it => it.code === code) || !!(p.board?.cells && boardBeadCounts(p.board).has(code));
+}
+
+const sigOf = p => {
+  // 换色之后图纸有没有再改过（改过就不能撤销换色了，免得把后来的修改也一起撤掉）
+  const s = JSON.stringify([p.items.map(it => [it.code, it.count]), p.board?.cells || null, p.board?.codes || null, p.build?.done || null]);
+  let x = 2166136261;
+  for (let i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 16777619); }
+  return (x >>> 0).toString(36) + ':' + s.length;
+};
+
+/**
+ * 整种换颜色：图纸里 from 这个颜色全部换成 to——清单、拼豆板的格子、锁定的格子、拼豆进度一起改，
+ * 换过的格子锁定（以后重新计算、核对都按它）。
+ *   to 不在图纸里：改名（from 的格子都变成 to）；
+ *   to 已经在图纸里：mode 'merge' 把 from 并到 to（清单颗数加到 to 上）；
+ *                    mode 'swap' 两个颜色互换（拼豆板上颜色认反了：清单不变，只把格子对调）。
+ * 由图片生成的图纸还会记进生成选项（以后“重新生成”也照这样换）。
+ * 换之前的样子存在 p.replaceUndo（只留最近一次），图纸没再改过就能 undoReplace 撤销。
+ */
+export async function replaceColor(id, from, to, { mode = 'merge' } = {}) {
+  guard();
+  if (!from || !to || from === to) throw new Error('要换成另一个颜色');
+  return patchPattern(id, p => {
+    if (p.status === 'done') throw new Error('已经拼完的图纸不能换颜色');
+    if (!patternHasCode(p, from)) throw new Error(`图纸里没有 ${from}`);
+    const exists = patternHasCode(p, to);
+    const swap = mode === 'swap' && exists;
+    if (swap && p.gen) throw new Error('由图片生成的图纸不能互换颜色');
+    for (const c of swap ? [from, to] : [from]) if (colorTouched(p, c)) throw new Error(`${c} 已经打了“拼好”的勾（或者扣过库存），不能整种换`);
+
+    // 拼豆板：改格子（或者直接给这一类改名），换过的格子锁定
+    const board = p.board?.cells && typeof p.board.cells === 'string' ? relabelBoard(p.board, from, to, swap) : p.board;
+
+    // 清单
+    let items = p.items;
+    if (p.gen && board?.cells) items = syncedItemsOf(p.items.map(it => (it.code === from ? { ...it, code: to } : it)), board);
+    else if (!swap) {
+      if (p.items.some(it => it.code === to)) {
+        const n = p.items.filter(it => it.code === from).reduce((a, it) => a + it.count, 0);
+        let added = false;
+        items = p.items.filter(it => it.code !== from).map(it => (it.code === to && !added ? (added = true, { ...it, count: it.count + n }) : it));
+      } else items = p.items.map(it => (it.code === from ? { ...it, code: to } : it));
+    }
+
+    // 拼豆进度：to 原来打了勾、现在多了 from 的格子 → 勾去掉（多出来的还没拼）
+    let build = p.build;
+    if (build?.done?.length) build = { ...build, done: build.done.filter(c => !(c === to && !swap)) };
+
+    // 生成的图纸：记进生成选项（重新生成时也这样换）
+    let gen = p.gen;
+    if (gen?.opts) {
+      const rep = (gen.opts.replace || []).map(([a, b]) => [a, b === from ? to : b]).filter(([a]) => a !== from);
+      gen = { ...gen, opts: { ...gen.opts, replace: [...rep, [from, to]], exclude: (gen.opts.exclude || []).filter(c => c !== to) } };
+    }
+
+    const prev = { items: p.items, board: p.board, build: p.build, gen: p.gen };
+    const np = { ...p, items, board, build, gen, replaced: [...(p.replaced || []), { from, to, mode: swap ? 'swap' : exists ? 'merge' : 'rename', at: Date.now() }] };
+    if (!np.gen) delete np.gen;
+    np.replaceUndo = { from, to, mode: swap ? 'swap' : exists ? 'merge' : 'rename', at: Date.now(), prev, sig: sigOf(np) };
+    return np;
+  });
+}
+
+/**
+ * 拼豆板上 from 的格子全部换成 to（swap：两种互换），换过的格子锁定；核对建议里牵涉这两种颜色的去掉。
+ * 返回新的拼豆板（cells 是压成字符串的）
+ */
+export function relabelBoard(board, from, to, swap = false) {
+  const map = c => (c === from ? to : swap && c === to ? from : c);
+  const codes = [...board.codes];
+  let fi = codes.indexOf(from) + 1, ti = codes.indexOf(to) + 1;
+  const locks = new Map((board.locks || []).map(([i, c]) => [i, c ? map(c) : '']));
+  let cells = board.cells;
+  if (fi && !ti && !swap) {
+    codes[fi - 1] = to; // 改名：格子不用动
+    for (let i = 0; i < cells.length; i++) if (cells.charCodeAt(i) - 48 === fi) locks.set(i, to);
+  } else if (fi || (swap && ti)) {
+    if (!fi) { codes.push(from); fi = codes.length; }
+    if (!ti) { codes.push(to); ti = codes.length; }
+    let s = '';
+    for (let i = 0; i < cells.length; i++) {
+      const v = cells.charCodeAt(i) - 48;
+      if (v === fi) { s += String.fromCharCode(48 + ti); locks.set(i, to); }
+      else if (swap && v === ti) { s += String.fromCharCode(48 + fi); locks.set(i, from); }
+      else s += cells[i];
+    }
+    cells = s;
+  }
+  const rv = board.review;
+  const both = new Set([from, to]);
+  const risks = (rv?.risks || []).filter(r => !both.has(r.code) && !(r.partners || []).some(c => both.has(c)));
+  const st = board.stats || {};
+  const free = {};
+  for (const [c, n] of Object.entries(st.freeCounts || {})) free[map(c)] = (free[map(c)] || 0) + n;
+  return {
+    ...board, codes, cells, locks: [...locks],
+    stats: { ...st, freeCounts: free, legendUsed: [...new Set((st.legendUsed || []).filter(c => swap || c !== from))], emptyLike: [...new Set((st.emptyLike || []).map(map))] },
+    review: rv ? { ...rv, risks, riskCodes: [...new Set(risks.flatMap(r => [r.code, ...(r.partners || [])]))], uncertain: (rv.uncertain || []).filter(u => !locks.has(u.i)).map(u => ({ ...u, cand: [...new Set(u.cand.map(map))] })) } : rv,
+    // 逐格读到的色号：改名时跟着改（读到“from”的格子现在就是 to）
+    ocr: board.ocr && !swap && !board.ocr.codes.includes(to) ? { ...board.ocr, codes: board.ocr.codes.map(c => (c === from ? to : c)) } : board.ocr,
+  };
+}
+
+/** 刚才的整种换色还能不能撤销（之后图纸没再改过） */
+export function replaceUndoable(p) {
+  return !!(p?.replaceUndo && p.replaceUndo.sig === sigOf(p));
+}
+
+/** 撤销最近一次整种换色 */
+export async function undoReplace(id) {
+  guard();
+  return patchPattern(id, p => {
+    if (!replaceUndoable(p)) throw new Error('换色之后图纸又改过了，不能撤销');
+    const { prev } = p.replaceUndo;
+    const np = { ...p, items: prev.items, board: prev.board, build: prev.build, gen: prev.gen, replaced: (p.replaced || []).slice(0, -1) };
+    if (!np.gen) delete np.gen;
+    delete np.replaceUndo;
+    return np;
+  });
+}
+
 /** 还算不算“开始拼了”：打过勾，或者扣过库存（没撤销） */
 export function buildTouched(p) {
   return !!(p.build && ((p.build.done || []).length || Object.values(p.build.deducted || {}).some(n => n > 0)));
