@@ -96,8 +96,11 @@ export function guessLegendRectFromData(img, content) {
     if (bbest / n > 0.6) lastBand = y + 1;
   }
   const fallback = { x: content.x, y: content.y + content.h * 0.7, w: content.w, h: content.h * 0.3 };
-  const last = Math.max(lastLine, lastBand);
+  let last = Math.max(lastLine, lastBand);
   if (last < 0) return fallback;
+  // 格线是虚线、点线（浅灰）时，最后几行空格的格线连不成“长横线”：顺着格子的间距往下找，
+  // 同样间距、横竖都有格线的还算网格（编号栏也一起跳过）
+  last = followGrid(lum, w, h, step, last);
   const top = last + 3;
   const rest = h - top;
   // 横条下面只剩窄窄一条（清单只有一行、贴着图底）：里面有彩色的色块就用它
@@ -113,6 +116,58 @@ export function guessLegendRectFromData(img, content) {
   }
   if (rest < minRest || rest > h * 0.6) return fallback;
   return { x: content.x, y: content.y + top, w: content.w, h: rest };
+}
+
+/**
+ * 从 last（已经找到的最后一条格线）往下，按格子的间距一条一条找浅的格线：
+ * 那一行大半都是细线（比上下暗或亮 10 以上）、而且这一格里竖着的格线也大致按同样的间距排着（清单的色块没有这么密的竖线），
+ * 就算还是网格。间距从 last 上面的格线量。返回新的最后一条线。
+ */
+function followGrid(lum, w, h, step, last) {
+  const n = Math.floor(w / step);
+  const rowHit = y => {
+    if (y < 2 || y >= h - 2) return 0;
+    let k = 0;
+    for (let x = 0; x < w; x += step) { const a = lum(x, y), u = lum(x, y - 2), d = lum(x, y + 2); if ((a - u > 10 && a - d > 10) || (u - a > 10 && d - a > 10)) k++; }
+    return k / n;
+  };
+  // 间距：last 上下 600 像素里，横线（一行将近一半以上是细线）之间最常见的距离
+  const lines = [];
+  for (let y = Math.max(2, last - 600); y <= Math.min(h - 3, last + 600); y++) if (rowHit(y) >= 0.4 && (!lines.length || y - lines[lines.length - 1] > 2)) lines.push(y);
+  const gaps = lines.slice(1).map((y, i) => y - lines[i]).filter(g => g >= 6 && g <= 80).sort((a, b) => a - b);
+  if (gaps.length < 4) return last;
+  const p = gaps[gaps.length >> 1];
+  if (gaps.filter(g => Math.abs(g - p) <= 2).length < gaps.length * 0.6) return last;
+  // 这一行格子里的竖线在哪些位置：每一列（像素）在这几行里大半是细竖线的，算一条
+  const vertical = (y0, y1) => {
+    const xs = [];
+    let prev = -9;
+    for (let x = 2; x < w - 2; x++) {
+      let hit = 0, tot = 0;
+      for (let y = y0 + 2; y < y1 - 1; y++) { tot++; const a = lum(x, y), l = lum(x - 2, y), r = lum(x + 2, y); if ((a - l > 10 && a - r > 10) || (l - a > 10 && r - a > 10)) hit++; }
+      if (tot && hit >= tot * 0.35 && x - prev > 2) { xs.push(x); prev = x; }
+    }
+    return xs;
+  };
+  // 网格的竖线位置：last 上面或下面那一排格子里量（last 可能是网格最上面那条边）。
+  // 网格的竖线一条挨一条、间距正好是 p；清单的字、色块边上的竖线间距没这么整齐，也对不上这些位置
+  const combScore = xs => xs.slice(1).filter((x, i) => Math.abs(x - xs[i] - p) <= 2).length;
+  const above = vertical(Math.max(0, Math.round(last - p)), last), below = vertical(last, Math.min(h - 1, Math.round(last + p)));
+  const ref = combScore(above) >= combScore(below) ? above : below;
+  if (combScore(ref) < (w / p) * 0.4) return last;
+  const match = xs => { let k = 0, j = 0; for (const x of ref) { while (j < xs.length && xs[j] < x - 2) j++; if (j < xs.length && Math.abs(xs[j] - x) <= 2) k++; } return k / ref.length; };
+  let y = last, misses = 0, end = last;
+  for (let guard = 0; guard < 200; guard++) {
+    let best = -1, bv = 0;
+    for (let q = Math.round(y + p - 2); q <= Math.round(y + p + 2); q++) { const v = rowHit(q); if (v > bv) { bv = v; best = q; } }
+    // 横线很清楚、竖线将近一半还在原来的位置上；或者横线淡（空格那几行、被贴纸挡住一段）但竖线大多都在：都还是网格
+    const m = best > 0 && bv >= 0.2 ? match(vertical(end, best)) : 0;
+    if ((bv >= 0.45 && m >= 0.45) || m >= 0.6) { y = end = best; misses = 0; continue; }
+    // 中间偶尔几条被水印、贴纸、一片深色豆子挡住：再往下几格看看（最多连着 3 条）
+    if (misses++ >= 3) break;
+    y += p;
+  }
+  return end;
 }
 
 export function guessLegendRect(canvas, content) {

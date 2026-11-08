@@ -531,7 +531,13 @@ function digitizeOnce(img, { region, refs, locks = null, dewatermark = false }) 
     const med = labs.map(l => l).sort((a, b) => a[0] - b[0])[labs.length >> 1];
     const same = labs.filter(l => dLab(l, med) < 8).length;
     // 底色一致（水印、半透明编号栏会让一部分格子颜色偏一点；编号特征很明显时放宽）
-    return same >= labs.length * (strongStep ? 0.6 : 0.9);
+    // 编号特征很明显（几乎每格都有字、字的多少差得多、开头 1~9 那几格大多比后面两位数的字少）时，
+    // 底色可以有一部分不一样：标题、水印贴纸盖住了编号栏的一段（比如“图纸🚫转载…”压在编号上）
+    const head = all.length >= 14 ? [all.slice(0, 9), all.slice(9)] : null, tail = all.length >= 14 ? [all.slice(-9), all.slice(0, -9)] : null;
+    const medOf = a => [...a].sort((x, y) => x - y)[a.length >> 1];
+    const block = ([few, rest]) => few.filter(v => v < medOf(rest)).length >= 7;
+    const loose = digitStep && inks.length >= list.length * 0.9 && sd / mu >= 0.25 && ((head && block(head)) || (tail && block(tail)));
+    return same >= labs.length * (strongStep ? 0.6 : loose ? 0.5 : 0.9);
   };
   // 编号栏外面还有一两排“格子”（编号栏和清单之间的空白、清单方框的边也被当成了格线）：
   // 最外面 3 排里有一排明显是编号栏（像表头，而且 1~9 一位数、10 起两位数，字的多少有台阶）→ 连它和它外面的一起去掉

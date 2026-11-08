@@ -302,6 +302,55 @@ function emptyColors(F, printed, refLab, maxEmpty = Infinity) {
 }
 
 /**
+ * 拼豆板的“形状”（拼豆是连成一片的）：
+ *   holes = 被豆子围起来的空格（上下左右走不到网格边上的空白）；
+ *   lone  = 离开主体、孤零零的一小撮豆子（周围 8 格连在一起的一团，只有主体的 3% 不到；一颗落单的也算）——
+ *           多半是盖在空格上的标题、水印贴纸被认成了豆子。
+ * assign：每格的类（0 = 空）
+ */
+export function structureOf(assign, rows, cols) {
+  const N = rows * cols, out = new Uint8Array(N), stack = [];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const i = r * cols + c;
+    if ((r === 0 || c === 0 || r === rows - 1 || c === cols - 1) && !assign[i]) { out[i] = 1; stack.push(i); }
+  }
+  while (stack.length) {
+    const i = stack.pop(), r = (i / cols) | 0, c = i % cols;
+    for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const rr = r + dr, cc = c + dc;
+      if (rr < 0 || cc < 0 || rr >= rows || cc >= cols) continue;
+      const j = rr * cols + cc;
+      if (!assign[j] && !out[j]) { out[j] = 1; stack.push(j); }
+    }
+  }
+  const holes = [];
+  for (let i = 0; i < N; i++) if (!assign[i] && !out[i]) holes.push(i);
+  // 豆子连成的团（8 邻接）
+  const comp = new Int32Array(N).fill(-1), sizes = [];
+  for (let i = 0; i < N; i++) {
+    if (!assign[i] || comp[i] >= 0) continue;
+    const id = sizes.length; let n = 0;
+    comp[i] = id; stack.push(i);
+    while (stack.length) {
+      const j = stack.pop(); n++;
+      const r = (j / cols) | 0, c = j % cols;
+      for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+        const rr = r + dr, cc = c + dc;
+        if (rr < 0 || cc < 0 || rr >= rows || cc >= cols) continue;
+        const q = rr * cols + cc;
+        if (assign[q] && comp[q] < 0) { comp[q] = id; stack.push(q); }
+      }
+    }
+    sizes.push(n);
+  }
+  const main = Math.max(0, ...sizes);
+  const small = sizes.map(n => n < main && n <= Math.max(1, main * 0.03));
+  const lone = [];
+  for (let i = 0; i < N; i++) if (assign[i] && small[comp[i]]) lone.push(i);
+  return { holes, lone };
+}
+
+/**
  * 归类。refs：[{ code, count, rgb?, swatch?:[[r,g,b],…] 清单色块上取到的几种候选颜色 }]。返回
  *   { codes, cells(Uint8Array，0=空，i+1=codes[i]), counts, margin(Float32Array，每格的把握，越小越可疑),
  *     stats: { printed, exact, total, diff, beads, want, freeCounts, calibrated, textUsed }, suspects }
@@ -602,6 +651,41 @@ export function classifyFeatures(F, refs, opt = {}) {
     dewatermarked = true;
   }
 
+  // ---- 拼豆是连成一片的：被豆子围起来的空格（和外面的空白不连通）多半是漏认的豆子；
+  // 周围 8 格都没有豆子、孤零零的一颗，多半是认错的（水印、标题字盖在空格上）。
+  // 给这两种格子加一点代价再解一次——要不要改，还是由清单颗数来定：真正留空的洞、真正单独的一颗，
+  // 颗数对得上就不会改（改了反而多一颗 / 少一颗，罚得比这点代价多）----
+  let structFixed = 0;
+  if (opt.structure !== false && F.rows && F.cols) {
+    const rhoNow = dewatermarked ? rho / 2 : rho, P = 0.75 * rhoNow;
+    const hit = new Uint8Array(N);
+    const R = F.rows, C = F.cols;
+    for (let it = 0; it < 3; it++) {
+      const { holes, lone } = structureOf(sol.assign, R, C);
+      const fresh = [...holes, ...lone].filter(i => !hit[i] && !outlier[i] && !locks?.has(i));
+      if (!fresh.length) break;
+      // 围起来的空格：多半是被水印、贴纸盖住了，颜色、字都看不准——看起来再不像也最多只多花一点（rhoNow），
+      // 周围是什么颜色就更可能是什么颜色；空着要多花 P。最后是哪种颜色、要不要补，由清单还差哪种来定
+      for (const i of holes) {
+        if (hit[i]) continue;
+        hit[i] = 1;
+        const r = (i / C) | 0, c = i % C, nb = new Float32Array(K1);
+        for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+          const rr = r + dr, cc = c + dc;
+          if ((dr || dc) && rr >= 0 && cc >= 0 && rr < R && cc < C) nb[sol.assign[rr * C + cc]] += 1 / 8;
+        }
+        const base = cost[i * K1];
+        for (let k = 1; k < K1; k++) cost[i * K1 + k] = Math.min(cost[i * K1 + k], base + rhoNow) - 0.5 * rhoNow * nb[k];
+        cost[i * K1] += P;
+      }
+      for (const i of lone) if (!hit[i]) { hit[i] = 1; for (let k = 1; k < K1; k++) cost[i * K1 + k] += P; }
+      applyLocks();
+      const prev = sol.assign;
+      sol = solveCounts(cost, N, K1, target, total > 0 ? rhoNow : 0, sol.assign, outlier);
+      for (let i = 0; i < N; i++) if (sol.assign[i] !== prev[i]) structFixed++;
+    }
+  }
+
   // ---- 输出 ----
   const assign = sol.assign, pot = sol.pot;
   if (opt.debug) Object.assign(opt.debug, { cost, colorCost, pot, refLab, emptyLab });
@@ -648,6 +732,7 @@ export function classifyFeatures(F, refs, opt = {}) {
       printed, exact: codes.length - diff.length, total: codes.length, diff,
       beads: cntArr.reduce((a, b, k) => a + (k ? b : 0), 0), want: total, freeCounts, calibrated, textUsed, outliers: nOut, dewatermarked,
       legendUsed: codes.filter((c, k) => legendLab[k]),
+      structFixed, // 因为“围起来的空格 / 落单的一颗”改了几格
       // 颜色和空格一样的色号（白豆 vs 白色的空格）：没印色号时只看颜色数不出来，交叉核对时不比
       emptyLike: printed || !(maxEmpty > Math.max(5, N * 0.01)) ? [] : codes.filter((c, k) => emptyLab.some(e => de2000(refLab[k], e) < 4)),
     },

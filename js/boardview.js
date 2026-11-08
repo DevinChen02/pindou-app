@@ -99,21 +99,22 @@ export function drawBoard(g, q, board, { sel, done, place = null, show = 'real',
   g.fillStyle = '#f7f6f3'; g.fillRect(0, 0, W, H);
   const selIdx = sel ? codes.indexOf(sel) + 1 : 0;
   const dark = spot && selIdx > 0;
-  g.fillStyle = dark ? '#2f2f33' : '#ffffff'; g.fillRect(M, M, cols * CELL, rows * CELL);
+  // 拼豆板底色是浅灰（不是纯白）：白色、米白的豆子才看得出是一颗豆子，不会被当成空位
+  g.fillStyle = dark ? '#2f2f33' : '#e6e3dc'; g.fillRect(M, M, cols * CELL, rows * CELL);
   // 细格线
-  g.strokeStyle = dark ? '#3e3e43' : '#ebe9e4'; g.lineWidth = 1;
+  g.strokeStyle = dark ? '#3e3e43' : '#d8d4cc'; g.lineWidth = 1;
   g.beginPath();
   for (let c = 0; c <= cols; c++) { g.moveTo(M + c * CELL + 0.5, M); g.lineTo(M + c * CELL + 0.5, M + rows * CELL); }
   for (let r = 0; r <= rows; r++) { g.moveTo(M, M + r * CELL + 0.5); g.lineTo(M + cols * CELL, M + r * CELL + 0.5); }
   g.stroke();
   // 豆子
-  const peg = dark ? '#55555b' : '#dedbd4';
+  const peg = dark ? '#55555b' : '#bdb8ae';
   const colorOf = codes.map(c => rgbFor(c));
   const rad = CELL * 0.43, hole = CELL * 0.13;
   // 图纸网格以外的拼豆板位置：浅灰底（摆放时看得出图纸占哪一块）
   const gx0 = P.ox, gy0 = P.oy, gx1 = P.ox + board.cols, gy1 = P.oy + board.rows;
   if (gx0 > 0 || gy0 > 0 || gx1 < cols || gy1 < rows) {
-    g.fillStyle = dark ? '#28282b' : '#f1efea';
+    g.fillStyle = dark ? '#28282b' : '#f6f5f1';
     for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
       if (c >= gx0 && c < gx1 && r >= gy0 && r < gy1) continue;
       const x = P.mirror ? cols - 1 - c : c;
@@ -160,8 +161,9 @@ export function drawBoard(g, q, board, { sel, done, place = null, show = 'real',
       g.globalAlpha = stage === 'todo' ? 0.1 : 1;
       g.fillStyle = `rgb(${R},${G},${B})`;
       g.beginPath(); g.arc(cx, cy, rad, 0, Math.PI * 2); g.fill();
-      g.lineWidth = 1; g.strokeStyle = stage === 'done' ? 'rgba(0,0,0,.2)' : 'rgba(0,0,0,.28)'; g.stroke();
       const lum = 0.299 * R + 0.587 * G + 0.114 * B;
+      // 很浅的豆子（白、米白）描深一点的边：一眼看得出是一颗豆子
+      g.lineWidth = lum > 225 ? 1.3 : 1; g.strokeStyle = stage === 'done' ? 'rgba(0,0,0,.2)' : lum > 225 ? 'rgba(0,0,0,.4)' : 'rgba(0,0,0,.28)'; g.stroke();
       g.fillStyle = lum > 200 ? 'rgba(0,0,0,.14)' : 'rgba(255,255,255,.55)';
       g.beginPath(); g.arc(cx, cy, hole, 0, Math.PI * 2); g.fill();
       g.globalAlpha = 1;
