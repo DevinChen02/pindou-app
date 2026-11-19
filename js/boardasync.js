@@ -7,7 +7,7 @@ async function local(op, img, args) {
   if (op === 'clean') return (await import('./cells.js')).dewatermarkImage(img, args.xs, args.ys, args.cells);
   if (op === 'stitch') return (await import('./stitch.js')).stitchPlan(args.imgs);
   if (op === 'photo') return (await import('./photo.js')).convertPhoto(img, args);
-  if (op === 'photoGrid') return (await import('./photo.js')).detectPixelGrid(img);
+  if (op === 'photoGrid') return (await import('./photo.js')).detectPixelGrid(img, args?.rect || null);
   const m = await import('./board.js');
   return op === 'digitize' ? m.digitize(img, args) : m.classifyGrid(img, args.xs, args.ys, args.refs, args.opt);
 }

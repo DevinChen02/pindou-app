@@ -17,6 +17,7 @@ import { startSession } from './recognize.js';
 import { goPattern } from './patterns.js';
 import { beadBox, fits, resetSetup } from './boardsetup.js';
 import { readOnlyToast } from '../license.js';
+import { gridPage } from './pixelgrid.js';
 
 /** 生成用的颜色里不放这些：珠光、果冻、夜光、温变、透明（效果特殊，“全部色卡”里才用） */
 export const SPECIAL_SERIES = ['P', 'R', 'Y', 'Q', 'T'];
@@ -37,6 +38,7 @@ function defaults(settings, native) {
     bg: true, dither: native ? false : !!d.dither,
     // 保留线条（轮廓线连成一条、保持原来的颜色）、细节多少（精细 / 适中 / 简洁）
     lines: d.lines !== false, detail: detailOf(d),
+    islands: true, // 像素画：主体外面零星的小点（星星、闪光点）不放豆子
     exclude: [], replace: [],
   };
 }
@@ -51,10 +53,25 @@ async function newState(canvas, name) {
   const pix = g.getImageData(0, 0, canvas.width, canvas.height);
   const transparent = hasTransparency(pix);
   const whole = { x: 0, y: 0, w: canvas.width, h: canvas.height };
-  const auto = (transparent && opaqueBounds(pix)) || whole;
+  let auto = (transparent && opaqueBounds(pix)) || whole;
   let grid = null;
   try { grid = await runBoard('photoGrid', pix, {}); } catch (e) { console.warn(e); }
+  // 像素画放在一大片底色中间（四周有水印小字、星星）：只在主体上找到了像素格，默认就只框主体
+  if (grid?.box) auto = grid.box;
   return { sub: 'gen', canvas, name, transparent, whole, auto, rect: { ...auto }, grid, opts: null, result: null, prep: null, srcId: null, pid: null, sid: null };
+}
+
+/** 原图的像素（找像素格、对齐格子用；第一次用时取） */
+export function pixOf(st) {
+  if (!st.pixData) st.pixData = st.canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, st.canvas.width, st.canvas.height);
+  return st.pixData;
+}
+
+/** 用上像素格：按原来的像素一格一颗、颜色不限（像素画本来就没几种颜色） */
+export function useGrid(st, grid) {
+  st.grid = grid;
+  st.result = null; st.prep = null;
+  if (st.opts) Object.assign(st.opts, { size: 'native', maxColors: 0, dither: false });
 }
 
 /** 选了一张图 */
@@ -104,7 +121,8 @@ async function stateFromGen(gen) {
   const st = await newState(canvas, name);
   st.srcId = gen.srcId;
   if (gen.userRect) st.rect = { ...gen.userRect };
-  st.opts = { ...defaults({}, false), ...gen.opts, detail: detailOf(gen.opts), lines: gen.opts?.lines !== false, exclude: [...(gen.opts?.exclude || [])], replace: (gen.opts?.replace || []).map(x => [...x]) };
+  if (gen.grid) st.grid = { ...gen.grid }; // 上次用的像素格（可能是自己调过的）
+  st.opts = { ...defaults({}, false), ...gen.opts, detail: detailOf(gen.opts), lines: gen.opts?.lines !== false, islands: gen.opts?.islands ?? false, exclude: [...(gen.opts?.exclude || [])], replace: (gen.opts?.replace || []).map(x => [...x]) };
   delete st.opts.clean;
   return st;
 }
@@ -143,6 +161,7 @@ export async function renderPhoto(app) {
   const st = app.rec.photo;
   if (!st) { app.rec.step = 'pick'; return app.render(); }
   if (st.sub === 'crop') return cropPage(app, st);
+  if (st.sub === 'grid') return gridPage(app, st);
   return genPage(app, st);
 }
 
@@ -159,7 +178,17 @@ function cropPage(app, st) {
       st.auto.w !== st.whole.w || st.auto.h !== st.whole.h ? h('button.btn.soft.sm', { onclick: () => { st.rect = { ...st.auto }; app.rerender(); } }, '只框有东西的地方') : null,
       cr.tools),
     h('div.sticky-actions', h('button.btn.primary.block.big.pg-crop-done', {
-      onclick: () => { st.rect = cr.get(); st.sub = 'gen'; st.result = null; app.render(); },
+      onclick: async e => {
+        st.rect = cr.get(); st.sub = 'gen'; st.result = null;
+        // 框过了：框里再找一次像素格（整张图上没找到的，只框像素画那一块往往就找到了）；自己调过的格子不动
+        if (!st.grid?.user) {
+          e.target.disabled = true; e.target.textContent = '正在找像素格…';
+          let g = null;
+          try { g = await runBoard('photoGrid', pixOf(st), { rect: st.rect }); } catch (err) { console.warn(err); }
+          if (g && !st.grid) { useGrid(st, g); toast(`是像素画：原来每个像素 ${g.px.toFixed(1)} 点，按原来的像素一格一颗`, 'ok'); } else if (g) st.grid = g;
+        }
+        app.render();
+      },
     }, '完成')));
 }
 
@@ -218,7 +247,7 @@ function ensureResult(app, st, inv) {
   // 像素画（原图像素、从原来的像素格缩放）一格就是一个像素：不找线条、不抹细节
   const pixel = L.native || !!L.via;
   const lines = !pixel && o.lines, detail = pixel ? 'fine' : o.detail;
-  const key = JSON.stringify([L.rect, L.cols, L.rows, L.inner, L.via || null, codes, o.maxColors, o.bg, o.dither, lines, detail, o.replace]);
+  const key = JSON.stringify([L.rect, L.cols, L.rows, L.inner, L.via || null, codes, o.maxColors, o.bg, o.dither, lines, detail, o.replace, o.islands !== false]);
   if (st.result?.key === key) return { ready: true };
   if (st.want === key) return { ready: false };
   st.want = key;
@@ -228,11 +257,13 @@ function ensureResult(app, st, inv) {
     return { ready: true };
   }
   const P = prepared(st, L);
-  const args = { rect: P.rect, cols: L.cols, rows: L.rows, inner: L.inner, via: L.via || null, pal: codes.map(c => [c, ...rgbOf(c)]), maxColors: o.maxColors, bg: o.bg, dither: o.dither, lines, detail, replace: o.replace };
+  const args = { rect: P.rect, cols: L.cols, rows: L.rows, inner: L.inner, via: L.via || null, pal: codes.map(c => [c, ...rgbOf(c)]), maxColors: o.maxColors, bg: o.bg, dither: o.dither, lines, detail, replace: o.replace, islands: o.islands !== false };
   runBoard('photo', P.img, args).then(res => {
     if (st.want !== key) return;
     st.want = null;
-    st.result = { ...res, key, L, error: res.error || null };
+    // 像素画：四周整行整列都是空的（去掉的底色、星星）就裁掉，图纸只留有豆子的范围
+    const T = pixel && !res.error ? trimEmpty(res, L) : { res, L };
+    st.result = { ...T.res, key, L: T.L, error: res.error || null };
     if (app.rec.photo === st && app.rec.step === 'photo' && st.sub === 'gen' && app.pat.page === 'add') app.rerender();
   }).catch(e => {
     if (st.want !== key) return;
@@ -241,6 +272,21 @@ function ensureResult(app, st, inv) {
     if (app.rec.photo === st && app.rec.step === 'photo') app.rerender();
   });
   return { ready: false };
+}
+
+/** 四周整行整列都没有豆子的裁掉：返回裁过的结果和格子（原图上的范围跟着缩） */
+export function trimEmpty(res, L) {
+  const { cols, rows, cells } = res;
+  let c0 = cols, c1 = -1, r0 = rows, r1 = -1;
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) if (cells[r * cols + c]) { if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r; }
+  if (c1 < 0 || (c0 === 0 && r0 === 0 && c1 === cols - 1 && r1 === rows - 1)) return { res, L };
+  const nc = c1 - c0 + 1, nr = r1 - r0 + 1, fx = L.rect.w / cols, fy = L.rect.h / rows;
+  const out = new Uint8Array(nc * nr);
+  for (let r = 0; r < nr; r++) for (let c = 0; c < nc; c++) out[r * nc + c] = cells[(r + r0) * cols + c + c0];
+  return {
+    res: { ...res, cols: nc, rows: nr, cells: out, trimmed: true },
+    L: { ...L, cols: nc, rows: nr, rect: { x: L.rect.x + c0 * fx, y: L.rect.y + r0 * fy, w: nc * fx, h: nr * fy } },
+  };
 }
 
 const setOpt = (app, st, patch) => { Object.assign(st.opts, patch); app.rerender(); };
@@ -291,6 +337,9 @@ async function genPage(app, st) {
   const nat = nativeOf(st);
   const L = layoutOf(st);
   const busy = !ready;
+  // 像素画裁掉了四周空的行列：显示裁过的格数
+  const natN = R && !R.error && R.L?.native ? { cols: R.cols, rows: R.rows } : nat;
+  const LL = R && !R.error && !busy ? R.L : L;
 
   // 预览
   if (R && !R.error) {
@@ -310,7 +359,11 @@ async function genPage(app, st) {
     view.append(h('div.bd-wait', h('div.spinner'), h('p.small.muted', '正在生成图纸…')));
   }
   if (st.grid && nat && !busy) {
-    view.append(h('div.banner.info.pg-pixel', h('span.ico', '👾'), h('div.small', `这是放大过的像素画，原来是 ${nat.cols} × ${nat.rows} 格`, o.size === 'native' ? '：按原来的像素一格一颗，颜色一点不糊。' : '。选“原图像素”可以一格一颗。')));
+    view.append(h('div.banner.info.pg-pixel', h('span.ico', '👾'), h('div.grow',
+      h('div.small', st.grid.user ? `像素画，用的是你调过的格子：${natN.cols} × ${natN.rows} 格` : `这是放大过的像素画，原来是 ${natN.cols} × ${natN.rows} 格`, o.size === 'native' ? '：按原来的像素一格一颗，每格取中间的颜色。' : '。选“原图像素”可以一格一颗。'),
+      h('button.btn.sm.soft.pg-gridbtn', { style: { marginTop: '6px' }, onclick: () => { st.sub = 'grid'; app.render(); } }, '看格子对不对 / 调格子'))));
+  } else if (!st.grid && !busy && R && !R.error) {
+    view.append(h('div.row.end', h('button.link.small.pg-gridlink', { onclick: () => { st.sub = 'grid'; app.render(); } }, '👾 这是像素画？在图上画格子，一格一颗 ›')));
   }
 
   // 尺寸
@@ -319,9 +372,9 @@ async function genPage(app, st) {
   view.append(h('div.section-title', '尺寸（最长的一边几颗豆子）'),
     h('div.tag-pick.pg-sizes',
       sizes.map(v => h('button.tagopt' + (o.size === v ? '.on' : ''), { 'data-size': String(v), onclick: () => setOpt(app, st, { size: v }) },
-        v === 'native' ? `原图像素 ${nat.cols}×${nat.rows}` : String(v))),
+        v === 'native' ? `原图像素 ${natN.cols}×${natN.rows}` : String(v))),
       h('button.tagopt' + (custom ? '.on' : ''), { 'data-size': 'custom', onclick: () => customSize(app, st) }, custom ? `自定义 ${o.size}` : '自定义…')),
-    h('div.tiny.muted.pg-fit', { style: { margin: '6px 2px 0' } }, `${L.cols} × ${L.rows} 格，${boardHint(s, L.cols, L.rows)}`));
+    h('div.tiny.muted.pg-fit', { style: { margin: '6px 2px 0' } }, `${LL.cols} × ${LL.rows} 格，${boardHint(s, LL.cols, LL.rows)}`));
 
   // 颜色数
   view.append(h('div.section-title', '最多用几种颜色'),
@@ -349,7 +402,8 @@ async function genPage(app, st) {
   if (R?.bgFound || (R && R.bgRemoved)) toggles.push(sw('pg-bg', o.bg, '去掉背景', `四周的${bgName(R.bgRgb)}背景不放豆子${o.bg && R.bgRemoved ? `（省 ${fmtNum(R.bgRemoved)} 颗）` : ''}`, v => ({ bg: v })));
   const pixel = L.native || !!L.via;
   if (pixel) {
-    toggles.push(h('div.kv.pg-pixnote', h('div.grow', h('div.k', '按原来的像素'), h('div.d', '像素画一格就是一个像素：不找线条、不抹细节，颜色原样。'))));
+    toggles.push(h('div.kv.pg-pixnote', h('div.grow', h('div.k', '按原来的像素'), h('div.d', '像素画一格就是一个像素：不找线条、不抹细节；压缩、缩放带来的一点点色差归成原来那几种颜色。'))));
+    if (R?.islands) toggles.push(sw('pg-islands', o.islands !== false, '去掉零星的小点', `主体外面 ${R.islands} 小块（星星、闪光点、水印的一笔…），共 ${fmtNum(R.islandCells)} 颗${o.islands !== false ? '，不放豆子' : ''}`, v => ({ islands: v })));
   } else {
     toggles.push(sw('pg-lines', o.lines, '保留线条', `轮廓线、描边接成一条，保持线条原来的颜色，不会被缩没、断成点${o.lines && R?.lineCells ? ` · ${fmtNum(R.lineCells)} 格是线条` : ''}`, v => ({ lines: v })));
     toggles.push(h('div.kv.pg-detail', h('div.grow', h('div.k', '细节'),
@@ -483,7 +537,8 @@ async function finish(app, st) {
     const o = st.opts;
     const gen = {
       v: 1, srcId: st.srcId, rect: R.L.rect, userRect: { ...st.rect }, cols, rows, native: !!R.L.native,
-      opts: { size: o.size, maxColors: o.maxColors, set: o.set, bg: o.bg, dither: o.dither, lines: o.lines, detail: o.detail, exclude: [...o.exclude], replace: o.replace.map(x => [...x]) },
+      opts: { size: o.size, maxColors: o.maxColors, set: o.set, bg: o.bg, dither: o.dither, lines: o.lines, detail: o.detail, islands: o.islands !== false, exclude: [...o.exclude], replace: o.replace.map(x => [...x]) },
+      ...(st.grid ? { grid: { px: st.grid.px, ox: st.grid.ox, py: st.grid.py, oy: st.grid.oy, ...(st.grid.user ? { user: true } : {}) } } : {}),
       at: Date.now(),
     };
     // 下次默认用这次的选项（像素画的“原图像素”不算）

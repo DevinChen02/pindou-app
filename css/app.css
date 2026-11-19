@@ -906,3 +906,20 @@ main.build-view > .ro-banner { border-radius: 0; margin: 0; }
 .pg-detail .grow { min-width: 0; flex-basis: 100%; }
 .pg-detail-seg { flex: 1; }
 .pg-detail-seg button { min-height: 34px; }
+
+/* 像素画的格子（js/views/pixelgrid.js） */
+.pxg-hint { margin: 2px 2px 8px; }
+.pxg-stage { position: relative; height: 46vh; height: 46dvh; min-height: 240px; overflow: hidden; border-radius: 12px; background: #1c1c1e; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.pxg-stage.moving { cursor: move; }
+.pxg-layer { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.pxg-img { display: block; image-rendering: pixelated; }
+.pxg-over { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.pxg-sum { margin-top: 8px; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.pxg-fit { text-align: right; }
+.pxg-good { color: var(--ok-text); font-weight: 650; }
+.pxg-tools { margin-top: 8px; }
+.pxg-tools .seg { flex: 1; min-width: 190px; }
+.pxg-size { margin-top: 10px; }
+.pxg-more { margin: 10px 2px 0; }
+.pg-pixel .grow { min-width: 0; }
+

@@ -132,11 +132,8 @@ function blockUniformity(img, gx, gy) {
   return tot ? good / tot : 0;
 }
 
-/**
- * 这张图是不是放大过的像素画（每个“像素”是一个 p×p 的同色小方块）。
- * 是的话返回 { px, ox, py, oy, U }：像素格的边长、起点，U = 每格中间同色的比例；不是返回 null。
- */
-export function detectPixelGrid(img) {
+/** 整张图都按一个像素格找 */
+function detectWhole(img) {
   const { width: W, height: H } = img;
   if (W < 24 || H < 24) return null;
   const { ex, ey } = edgeProfiles(img);
@@ -146,6 +143,166 @@ export function detectPixelGrid(img) {
   const U = blockUniformity(img, gx, gy);
   if (U < 0.8) return null;
   return { px: gx.p, ox: gx.o, py: gy.p, oy: gy.o, U };
+}
+
+/** 图的一块（整数像素的框）拷出来 */
+export function cropImage(img, r) {
+  const { data: d, width: W } = img;
+  const x0 = Math.max(0, Math.floor(r.x)), y0 = Math.max(0, Math.floor(r.y));
+  const x1 = Math.min(W, Math.ceil(r.x + r.w)), y1 = Math.min(img.height, Math.ceil(r.y + r.h));
+  const w = Math.max(0, x1 - x0), h = Math.max(0, y1 - y0);
+  const out = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) out.set(d.subarray(((y0 + y) * W + x0) * 4, ((y0 + y) * W + x0 + w) * 4), y * w * 4);
+  return { data: out, width: w, height: h, x: x0, y: y0 };
+}
+
+/**
+ * 有东西的地方：和四边的底色差得多的像素连成的最大一块的范围（像素画放在一大片底色中间，
+ * 四周还有水印小字、星星之类的点缀时，只看主体）。没有一圈明显的底色返回 null
+ */
+export function contentBox(img) {
+  const { data: d, width: W, height: H } = img;
+  const s = Math.max(1, Math.ceil(Math.max(W, H) / 500));
+  const w = Math.ceil(W / s), h = Math.ceil(H / s);
+  const px = (i, j) => (Math.min(H - 1, j * s) * W + Math.min(W - 1, i * s)) * 4;
+  // 底色：四边像素的中位数，而且四边大部分都是它
+  const R = [], G = [], B = [];
+  const edge = [];
+  for (let i = 0; i < w; i++) edge.push(px(i, 0), px(i, h - 1));
+  for (let j = 0; j < h; j++) edge.push(px(0, j), px(w - 1, j));
+  for (const o of edge) if (d[o + 3] >= OPA) { R.push(d[o]); G.push(d[o + 1]); B.push(d[o + 2]); }
+  if (R.length < edge.length * 0.6) return null;
+  const med = a => [...a].sort((x, y) => x - y)[a.length >> 1];
+  const bg = [med(R), med(G), med(B)];
+  const far = o => d[o + 3] >= OPA && Math.max(Math.abs(d[o] - bg[0]), Math.abs(d[o + 1] - bg[1]), Math.abs(d[o + 2] - bg[2])) > 28;
+  let same = 0;
+  for (const o of edge) if (d[o + 3] >= OPA && !far(o)) same++;
+  if (same < edge.length * 0.6) return null;
+  const mask = new Uint8Array(w * h);
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) mask[j * w + i] = far(px(i, j)) ? 1 : 0;
+  // 连通块（隔一格也算连着：细线、淡色的描边断开一点的地方）
+  const lab = new Int32Array(w * h).fill(-1);
+  let best = null;
+  const stack = [];
+  for (let k = 0; k < w * h; k++) {
+    if (!mask[k] || lab[k] >= 0) continue;
+    const id = k;
+    lab[k] = id; stack.push(k);
+    let n = 0, x0 = w, x1 = -1, y0 = h, y1 = -1;
+    while (stack.length) {
+      const q = stack.pop(), qi = q % w, qj = (q - qi) / w;
+      n++; if (qi < x0) x0 = qi; if (qi > x1) x1 = qi; if (qj < y0) y0 = qj; if (qj > y1) y1 = qj;
+      for (let dj = -2; dj <= 2; dj++) for (let di = -2; di <= 2; di++) {
+        const ni = qi + di, nj = qj + dj;
+        if (ni < 0 || nj < 0 || ni >= w || nj >= h) continue;
+        const nk = nj * w + ni;
+        if (mask[nk] && lab[nk] < 0) { lab[nk] = id; stack.push(nk); }
+      }
+    }
+    if (!best || n > best.n) best = { n, x0, x1, y0, y1 };
+  }
+  if (!best || best.n < w * h * 0.002) return null;
+  const pad = 3 * s;
+  const x = Math.max(0, best.x0 * s - pad), y = Math.max(0, best.y0 * s - pad);
+  return { x, y, w: Math.min(W, (best.x1 + 1) * s + pad) - x, h: Math.min(H, (best.y1 + 1) * s + pad) - y, bg };
+}
+
+/**
+ * 这张图是不是放大过的像素画（每个“像素”是一个 p×p 的同色小方块）。
+ * 是的话返回 { px, ox, py, oy, U, box? }：像素格的边长、起点（整张图的坐标），U = 每格中间同色的比例；不是返回 null。
+ * rect：只在这个框里找（用户框选过）。整块找不到时只看主体（四周一大片底色、角上有水印小字、星星）再找一次，
+ * 这时 box 是主体的范围。
+ */
+export function detectPixelGrid(img, rect = null) {
+  const r = rect ? cropImage(img, rect) : { data: img.data, width: img.width, height: img.height, x: 0, y: 0 };
+  const shift = (g, dx, dy, box = null) => ({ ...g, ox: (((g.ox + dx) % g.px) + g.px) % g.px, oy: (((g.oy + dy) % g.py) + g.py) % g.py, ...(box ? { box } : {}) });
+  const g = detectWhole(r);
+  if (g) return shift(g, r.x, r.y);
+  const box = contentBox(r);
+  if (!box || box.w * box.h > r.width * r.height * 0.9) return null;
+  const sub = cropImage(r, box);
+  const g2 = detectWhole(sub);
+  if (!g2) return null;
+  return shift(g2, r.x + sub.x, r.y + sub.y, { x: r.x + box.x, y: r.y + box.y, w: box.w, h: box.h });
+}
+
+/** 一个方向上颜色突变的位置（连着的几列算一条，取重心）和强度 */
+function edgeRuns(e, n) {
+  const vals = Float32Array.from(e).sort();
+  const top = vals[Math.floor(vals.length * 0.97)];
+  if (!(top > 0.01)) return [];
+  const th = top * 0.3, runs = [];
+  let cur = null;
+  for (let x = 1; x < n; x++) {
+    if (!(e[x] > th)) continue;
+    if (cur && x - cur.last <= 1) { cur.sw += e[x]; cur.sx += e[x] * x; cur.last = x; } else { cur = { sw: e[x], sx: e[x] * x, last: x }; runs.push(cur); }
+  }
+  return runs.map(r => ({ c: r.sx / r.sw, w: r.sw }));
+}
+
+/** 突变里有多少（按强度）落在格线 o + k·p 附近（0.15 格以内）：0–1，越接近 1 对得越齐 */
+function alignScore(runs, p, o) {
+  let hit = 0, tot = 0;
+  for (const r of runs) { tot += r.w; const t = (r.c - o) / p; if (Math.abs(t - Math.round(t)) <= 0.15) hit += r.w; }
+  return tot ? hit / tot : 0;
+}
+
+/**
+ * 一个方向：在 p0 附近（±range）找让突变都落在格线上的边长和起点。
+ * 每个候选边长把突变的相位（位置 mod 边长）做直方图，最集中的那个相位的得分；最后按选中的格线做直线拟合细调
+ */
+function alignAxis(runs, p0, o0, range) {
+  if (runs.length < 3) return { p: p0, o: o0, S: 0 };
+  const B = 72, step = Math.max(0.0004, range / 300);
+  let best = null;
+  for (let f = 1 - range; f <= 1 + range + 1e-9; f += step) {
+    const p = p0 * f;
+    const hist = new Float32Array(B);
+    for (const r of runs) { const ph = ((r.c % p) + p) % p / p; hist[Math.floor(ph * B) % B] += r.w; }
+    for (let i = 0; i < B; i++) {
+      let sc = 0;
+      for (let d = -5; d <= 5; d++) sc += hist[(i + d + B) % B];
+      // 一样好时取离原来的边长近的
+      const key = sc - Math.abs(f - 1) * 1e-3;
+      if (!best || key > best.key) best = { key, p, o: (i + 0.5) / B * p };
+    }
+  }
+  let { p, o } = best;
+  for (let it = 0; it < 4; it++) {
+    let sw = 0, sk = 0, sc = 0, skk = 0, skc = 0;
+    for (const r of runs) {
+      const k = Math.round((r.c - o) / p);
+      if (Math.abs(r.c - o - k * p) > 0.25 * p) continue;
+      sw += r.w; sk += r.w * k; sc += r.w * r.c; skk += r.w * k * k; skc += r.w * k * r.c;
+    }
+    const den = sw * skk - sk * sk;
+    if (!(den > 0)) break;
+    const p2 = (sw * skc - sk * sc) / den;
+    if (!(p2 > p0 * (1 - range * 1.5) && p2 < p0 * (1 + range * 1.5))) break;
+    p = p2; o = (sc - p * sk) / sw;
+  }
+  return { p, o, S: alignScore(runs, p, o) };
+}
+
+/**
+ * 按大概的像素格（用户调的、自动找的）把格线对齐到像素边上：只看框里的颜色突变，在原来的边长附近（±range）找最对得上的。
+ * 返回 { px, ox, py, oy, S }（S：突变落在格线上的比例，两个方向取小的）
+ */
+export function refineGrid(img, g, rect, range = 0.12) {
+  const r = cropImage(img, rect);
+  if (r.width < 8 || r.height < 8) return { ...g, S: 0 };
+  const { ex, ey } = edgeProfiles(r);
+  const fx = alignAxis(edgeRuns(ex, r.width), g.px, g.ox - r.x, range);
+  const fy = alignAxis(edgeRuns(ey, r.height), g.py, g.oy - r.y, range);
+  return { px: fx.p, ox: ((fx.o + r.x) % fx.p + fx.p) % fx.p, py: fy.p, oy: ((fy.o + r.y) % fy.p + fy.p) % fy.p, S: Math.min(fx.S, fy.S) };
+}
+
+/** 这套格子对得齐不齐：框里的颜色突变有多少落在格线上（0–1，两个方向取小的） */
+export function gridFit(img, g, rect) {
+  const r = cropImage(img, rect);
+  if (r.width < 8 || r.height < 8) return 0;
+  const { ex, ey } = edgeProfiles(r);
+  return Math.min(alignScore(edgeRuns(ex, r.width), g.px, g.ox - r.x), alignScore(edgeRuns(ey, r.height), g.py, g.oy - r.y));
 }
 
 /** 把一个框对齐到像素格（一格至少六成在框里才算）：{ x, y, w, h, cols, rows } */
@@ -577,14 +734,21 @@ export function convertPhoto(img, o) {
     const L = rgbToLab([rgbC[i * 3], rgbC[i * 3 + 1], rgbC[i * 3 + 2]]);
     lab[i * 3] = L[0]; lab[i * 3 + 1] = L[1]; lab[i * 3 + 2] = L[2];
   }
+  // 像素画：图上本来只有十几二十种颜色，压缩、缩放过的截图里同一种颜色的格子差一点点：先归成原来那几种
+  const pixelArt = !photo;
+  if (pixelArt) snapPixelColors(lab, active, N);
   const bgInfo = findBackground(lab, rgbC, active, cols, rows);
   let bgRemoved = 0;
   if (bgInfo && o.bg) for (let i = 0; i < N; i++) if (bgInfo.mask[i]) { active[i] = 0; isL[i] = 0; bgRemoved++; }
+  // 像素画：主体外面零星的小块（星星、闪光点、水印的一笔）不放豆子
+  const isl = pixelArt ? islandsOf(active, cols, rows) : null;
+  let islandsRemoved = 0;
+  if (isl && o.islands !== false) for (const i of isl.cells) { active[i] = 0; islandsRemoved++; }
   let nLine = 0;
   for (let i = 0; i < N; i++) nLine += isL[i];
   // 忽略细节：格子级保边平滑（细碎的明暗变化抹平，颜色分界、线条不动）
   if (DP.smooth) lab.set(smoothCells(lab, active, isL, cols, rows, DP.sig, DP.smooth));
-  const base = { cols, rows, bgFound: !!bgInfo, bgRgb: bgInfo?.rgb || null, bgRemoved, transparent, lineCells: nLine, detail };
+  const base = { cols, rows, bgFound: !!bgInfo, bgRgb: bgInfo?.rgb || null, bgRemoved, transparent, lineCells: nLine, detail, islands: isl ? isl.n : 0, islandCells: isl ? isl.cells.length : 0, islandsRemoved };
   let nAct = 0;
   for (let i = 0; i < N; i++) nAct += active[i];
   if (!nAct) return { ...base, error: transparent === N ? '图上全是透明的，没有可以拼的部分' : '去掉背景后什么都不剩了（可以关掉“去掉背景”）', codes: [], cells: new Uint8Array(N), counts: [], beads: 0 };
@@ -632,6 +796,16 @@ export function convertPhoto(img, o) {
         if (b === a) continue;
         const wb = wOf.get(b) || 0, e = de2000(palLab[a], palLab[b]);
         if ((e < 3.2 && wb >= wa) || (e < 5 && wa < wb * 0.2)) { S.delete(a); wOf.set(b, wb + wa); break; }
+      }
+    }
+    // 像素画：整张图只有一两格的颜色（糊掉的边、压缩出来的杂色）并到最接近的那种（为一两颗豆子多买一种不值得）
+    if (pixelArt) {
+      for (const a of [...S].sort((x, y) => (wOf.get(x) || 0) - (wOf.get(y) || 0))) {
+        const wa = wOf.get(a) || 0;
+        if (wa > 2 || S.size <= 1) break;
+        let b = -1, be = Infinity;
+        for (const m of S) if (m !== a && (wOf.get(m) || 0) > 2) { const e = de2000(palLab[a], palLab[m]); if (e < be) { be = e; b = m; } }
+        if (b >= 0 && be < 20) { S.delete(a); wOf.set(b, (wOf.get(b) || 0) + wa); }
       }
     }
   } else if (S.size > K) {
@@ -733,6 +907,68 @@ export function convertPhoto(img, o) {
   for (let i = 0; i < N; i++) if (codeOfCell[i]) cells[i] = at.get(codeOfCell[i]);
   const counts = codes.map(c => cnt.get(c));
   return { ...base, codes, cells, counts, beads: counts.reduce((a, b) => a + b, 0), err: en ? es / en : 0 };
+}
+
+/**
+ * 像素画的颜色：按出现的格子数从多到少，和已有的某一种差不到 ΔE 5 的归进那一种（用那一种最常见的颜色），
+ * 否则是新的一种；最后只有零星几格、又和某一种大的差得不远的（糊掉的边、压缩噪点）也并过去。
+ * 直接改 lab（每格换成它那一种的颜色）
+ */
+export function snapPixelColors(lab, active, N, { T = 5, smallT = 14 } = {}) {
+  const bins = new Map();
+  let total = 0;
+  for (let i = 0; i < N; i++) {
+    if (!active[i]) continue;
+    total++;
+    const key = `${Math.round(lab[i * 3] / 1.5)}|${Math.round(lab[i * 3 + 1] / 1.5)}|${Math.round(lab[i * 3 + 2] / 1.5)}`;
+    let b = bins.get(key);
+    if (!b) { b = { l: [lab[i * 3], lab[i * 3 + 1], lab[i * 3 + 2]], n: 0, cells: [] }; bins.set(key, b); }
+    b.n++; b.cells.push(i);
+  }
+  const list = [...bins.values()].sort((a, b) => b.n - a.n);
+  const cents = [];
+  const nearest = (l, among) => { let k = -1, kd = Infinity; for (const c of among) { const e = de2000(l, c.l); if (e < kd) { kd = e; k = c; } } return [k, kd]; };
+  for (const b of list) {
+    const [c, e] = nearest(b.l, cents);
+    if (c && e < T) { c.n += b.n; c.cells.push(...b.cells); } else cents.push({ l: b.l, n: b.n, cells: [...b.cells] });
+  }
+  const small = Math.max(2, Math.round(total * 0.0015));
+  const big = cents.filter(c => c.n > small);
+  for (const c of cents) {
+    if (c.n > small || !big.length) continue;
+    const [t, e] = nearest(c.l, big);
+    if (e < smallT) { t.cells.push(...c.cells); c.cells = []; }
+  }
+  for (const c of cents) for (const i of c.cells) { lab[i * 3] = c.l[0]; lab[i * 3 + 1] = c.l[1]; lab[i * 3 + 2] = c.l[2]; }
+  return cents.filter(c => c.cells.length).length;
+}
+
+/**
+ * 主体外面零星的小块：豆子 8 连通分块，比最大的一块小得多（不到它的 3%、最多 30 格）的那些。
+ * 返回 { n: 几块, cells: [格子] }（没有就 null）
+ */
+export function islandsOf(active, cols, rows) {
+  const N = cols * rows, comp = new Int32Array(N).fill(-1), comps = [];
+  for (let s0 = 0; s0 < N; s0++) {
+    if (!active[s0] || comp[s0] >= 0) continue;
+    const cells = [s0];
+    comp[s0] = comps.length;
+    for (let q = 0; q < cells.length; q++) {
+      const i = cells[q], r = (i / cols) | 0, c = i % cols;
+      for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+        const rr = r + dr, cc = c + dc;
+        if (rr < 0 || cc < 0 || rr >= rows || cc >= cols) continue;
+        const j = rr * cols + cc;
+        if (active[j] && comp[j] < 0) { comp[j] = comps.length; cells.push(j); }
+      }
+    }
+    comps.push(cells);
+  }
+  if (comps.length < 2) return null;
+  const main = Math.max(...comps.map(c => c.length));
+  const lim = Math.min(30, Math.max(3, main * 0.03));
+  const out = comps.filter(c => c.length !== main && c.length <= lim);
+  return out.length ? { n: out.length, cells: out.flat() } : null;
 }
 
 /** 选好的尺寸（最长边几颗）→ 列数、行数 */

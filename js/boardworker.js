@@ -8,7 +8,7 @@ self.onmessage = e => {
   const { id, op, img, args } = e.data;
   try {
     const out = op === 'digitize' ? digitize(img, args) : op === 'clean' ? dewatermarkImage(img, args.xs, args.ys, args.cells)
-      : op === 'stitch' ? stitchPlan(args.imgs) : op === 'photo' ? convertPhoto(img, args) : op === 'photoGrid' ? detectPixelGrid(img)
+      : op === 'stitch' ? stitchPlan(args.imgs) : op === 'photo' ? convertPhoto(img, args) : op === 'photoGrid' ? detectPixelGrid(img, args?.rect || null)
       : classifyGrid(img, args.xs, args.ys, args.refs, args.opt);
     self.postMessage({ id, out });
   } catch (err) {
