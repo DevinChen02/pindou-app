@@ -8,9 +8,10 @@ import { renderRecognize, savedBanner } from './recognize.js';
 import { isGenerated, regenerate } from './photo.js';
 import { renderBuild } from './build.js';
 import { replaceFlow, undoReplaceButton } from './replace.js';
+import { whButton, whChoice, shortNote } from './warehouse.js';
 
 // q：搜索词；status：状态筛选；tags：选中的分类（同时满足）；select：多选模式下选中的图纸 id
-const ui = { q: '', status: 'all', tags: new Set(), select: null, copies: new Map(), filter: 'all', open: null };
+const ui = { q: '', status: 'all', tags: new Set(), select: null, copies: new Map(), filter: 'all', open: null, whView: null, totWh: null };
 export const STATUS = { pending: ['待拼', 'accent'], building: ['拼豆中', 'warn'], done: ['已拼', 'ok'] };
 
 /** 回到图纸列表（切换标签、再点一次“图纸”时） */
@@ -236,11 +237,13 @@ async function renderDetail(app) {
 
   // 拼豆进度 + 主按钮
   const nDone = doneN(p);
+  const whs = await store.listWarehouses();
+  const buildWh = p.build?.wh ? await store.getWarehouse(p.build.wh) : null;
   if (p.status === 'building') {
     view.append(h('div.card.pd-build',
       h('div.row.between', h('b', '拼豆中'), h('span.small.muted', `已拼好 ${nDone}/${p.items.length} 色`)),
       h('div.progress', { style: { marginTop: '8px' } }, h('i', { style: { width: (nDone / p.items.length * 100) + '%' } })),
-      Object.keys(p.build?.deducted || {}).length ? h('div.tiny.muted', { style: { marginTop: '6px' } }, `已经从库存扣过：${Object.entries(p.build.deducted).filter(([, n]) => n > 0).map(([c, n]) => `${c}×${n}`).join('、')}`) : null,
+      Object.values(p.build?.deducted || {}).some(n => n > 0) ? h('div.tiny.muted', { style: { marginTop: '6px' } }, `已经从${whs.length > 1 && buildWh ? `“${store.whLabel(buildWh)}”` : '库存'}扣过：${Object.entries(p.build.deducted).filter(([, n]) => n > 0).map(([c, n]) => `${c}×${n}`).join('、')}`) : null,
       h('div.row.end', { style: { marginTop: '6px' } }, h('button.link.small.pd-revert', { onclick: () => revertPending(app, p) }, '↩ 撤回为待拼'))));
   }
   if (p.status === 'done') {
@@ -268,7 +271,9 @@ async function renderDetail(app) {
 
   // 库存对照（还要扣的部分）
   if (p.status !== 'done') {
-    const inv = await store.getInventory();
+    // 对照哪个仓库：在这里点过的 → 这次拼豆结算过的仓库 → 当前仓库
+    const whId = whOfDetail(p, whs, await store.patternWh(p));
+    const inv = await store.getInventory(whId);
     const left = store.remainingNeed(p, settings).filter(r => r.left > 0);
     const rows = left.map(r => {
       const stock = store.stockOf(inv, r.code), threshold = store.thresholdOf(inv, r.code, settings);
@@ -276,7 +281,16 @@ async function renderDetail(app) {
       return { ...r, stock, threshold, after, status: after < 0 ? 'short' : after < threshold ? 'low' : 'ok' };
     }).sort((a, b) => ({ short: 0, low: 1, ok: 2 })[a.status] - ({ short: 0, low: 1, ok: 2 })[b.status]);
     const short = rows.filter(r => r.status === 'short'), low = rows.filter(r => r.status === 'low');
-    view.append(h('div.section-title', '库存对照'));
+    view.append(h('div.sec-row.pd-stock-head', h('div.section-title', whs.length > 1 ? `库存对照 · ${inv.house.name}` : '库存对照')));
+    // 几个仓库时：每个仓库够不够，点一下换成按它对照
+    if (whs.length > 1 && left.length) {
+      const note = await shortNote(Object.fromEntries(left.map(r => [r.code, r.left])), settings);
+      view.append(h('div.wh-cover', whs.map(w => {
+        const t = note(w);
+        return h('button' + (w.id === whId ? '.on' : ''), { 'data-wh': w.id, onclick: () => { ui.whView = { pid: p.id, wh: w.id }; app.rerender(); } },
+          w.name, ' · ', h('span.' + (t === '够' ? 'ok' : 'bad'), t === '够' ? '够用' : t));
+      })));
+    }
     if (short.length) view.append(h('div.banner.bad', h('span.ico', '⛔️'), h('div', h('b', `${short.length} 种颜色不够，共缺 ${fmtNum(short.reduce((a, r) => a - r.after, 0))} 颗`), h('div.small', '可以先拼够的颜色，缺的补货后再拼。'))));
     else if (low.length) view.append(h('div.banner.warn', h('span.ico', '⚠️'), h('div', h('b', '全部够用'), h('div.small', `但拼完后有 ${low.length} 种颜色会低于补货线。`))));
     else view.append(h('div.banner.ok', h('span.ico', '✅'), h('div', h('b', '全部够用'), h('div.small', '拼完后所有颜色都还在补货线以上。'))));
@@ -443,22 +457,38 @@ async function again(app, p) {
   return goPattern(app, id);
 }
 
+/** 图纸详情里对照的仓库：在这里点过的（还在的话）→ 这次拼豆结算过的 → 当前仓库 */
+function whOfDetail(p, whs, fallback) {
+  return ui.whView?.pid === p.id && whs.some(w => w.id === ui.whView.wh) ? ui.whView.wh : fallback.id;
+}
+
+/** 结算时“从哪个仓库扣”的默认：图纸详情里正在对照的 → 这次拼豆结算过的 → 当前仓库 */
+export async function settleWhDefault(p) {
+  const whs = await store.listWarehouses();
+  return whOfDetail(p, whs, await store.patternWh(p));
+}
+
 /** 不用拼豆板、已经拼完了：按清单上的数量把剩下的全部扣掉 */
 async function directFinish(app, p) {
   const left = store.remainingNeed(p, app.settings, { byList: true }).filter(r => r.left > 0);
   const total = left.reduce((a, r) => a + r.left, 0);
+  const amounts = Object.fromEntries(left.map(r => [r.code, r.left]));
+  const whs = await store.listWarehouses();
+  let wh = await settleWhDefault(p);
+  const extra = whChoice(whs, wh, v => { wh = v; }, { note: await shortNote(amounts, app.settings) });
   if (!(await confirmDialog('确定后将确定减少拼豆库存，是否继续？', {
-    ok: '确定，扣减库存',
+    ok: '确定，扣减库存', extra,
     detail: `按清单上的数量扣减 ${left.length} 种颜色，共 ${fmtNum(total)} 颗。库存记录不够的颜色扣到 0 为止。之后可以在图纸里“撤销扣减”。`,
   }))) return;
-  await finishAndShow(app, p, Object.fromEntries(left.map(r => [r.code, r.left])), { finish: true });
+  await finishAndShow(app, p, amounts, { finish: true, wh });
 }
 
-/** 结算后跳到完成页（补货提醒） */
+/** 结算后跳到完成页（补货提醒）。opts.wh：从哪个仓库扣（不给：这次拼豆结算过的仓库 → 当前仓库） */
 export async function finishAndShow(app, p, amounts, opts) {
   try {
     const txId = await store.settleBuild(p.id, amounts, opts);
-    app.pat.result = { txId, patternId: p.id, codes: Object.keys(amounts).filter(c => amounts[c] > 0), name: p.name, finished: !!opts.finish, partial: !!opts.partial, abandon: !!opts.abandon };
+    const after = await store.getPattern(p.id);
+    app.pat.result = { txId, patternId: p.id, codes: Object.keys(amounts).filter(c => amounts[c] > 0), name: p.name, finished: !!opts.finish, partial: !!opts.partial, abandon: !!opts.abandon, wh: opts.wh || after?.build?.wh || after?.history?.at(-1)?.wh || null };
     return goPattern(app, p.id, 'done');
   } catch (e) { toast(e.message, 'error'); }
 }
@@ -499,7 +529,9 @@ async function renderDone(app) {
   app.setTitle(res.finished && !res.partial ? '拼完啦' : '已扣减库存');
   const settings = app.settings;
   const view = clear(app.view);
-  const inv = await store.getInventory();
+  // 补货提醒看这次扣的那个仓库
+  const inv = await store.getInventory(tx ? store.txWh(tx) : res.wh);
+  const many = (await store.listWarehouses()).length > 1;
   const used = res.codes;
   const need = used.map(code => ({ code, stock: store.stockOf(inv, code), threshold: store.thresholdOf(inv, code, settings) })).filter(x => x.stock < x.threshold);
   const others = store.lowStockList(inv, settings).filter(x => !used.includes(x.code));
@@ -507,7 +539,7 @@ async function renderDone(app) {
 
   view.append(h('div.banner.ok', h('span.ico', res.finished && !res.partial ? '🎉' : '✅'), h('div',
     h('b', res.finished && !res.partial ? `“${res.name}”拼完了，库存已扣减` : `“${res.name}”已扣减库存`),
-    h('div.small', (tx ? `${tx.deltas.length} 种颜色，共 ${fmtNum(total)} 颗。` : '没有需要扣的颜色。') + (res.abandon ? '图纸已放回“待拼”，以后再拼是全新的一次。' : '')))));
+    h('div.small', (tx ? `${many ? `从“${inv.house.name}”扣了 ` : ''}${tx.deltas.length} 种颜色，共 ${fmtNum(total)} 颗。` : '没有需要扣的颜色。') + (res.abandon ? '图纸已放回“待拼”，以后再拼是全新的一次。' : '')))));
   if (need.length) {
     view.append(h('div.card',
       h('h2', `🛒 这些颜色该补货了（${need.length}）`),
@@ -518,7 +550,7 @@ async function renderDone(app) {
   } else if (used.length) {
     view.append(h('div.card', h('h2', '👍 用到的颜色都还充足'), h('p.small.muted', '扣减后都在补货线以上。')));
   }
-  if (others.length) view.append(h('p.small.muted', `另外还有 ${others.length} 种颜色之前就低于补货线，可在“库存 → 待补货”查看。`));
+  if (others.length) view.append(h('p.small.muted', `另外${many ? `“${inv.house.name}”` : ''}还有 ${others.length} 种颜色之前就低于补货线，可在“库存 → 待补货”查看。`));
   view.append(h('div.col', { style: { marginTop: '12px' } },
     h('button.btn.primary.big.block', { onclick: () => { app.pat.result = null; goPattern(app, res.patternId); } }, '完成'),
     tx ? h('button.btn.block', {
@@ -527,7 +559,7 @@ async function renderDone(app) {
         try { await store.undoTransaction(res.txId); toast('已撤销', 'ok'); app.pat.result = null; goPattern(app, res.patternId); } catch (e) { toast(e.message, 'error'); }
       },
     }, '撤销这次扣减') : null,
-    h('button.btn.ghost.block', { onclick: () => { app.pat.result = null; app.go('inventory'); } }, '查看库存')));
+    h('button.btn.ghost.block', { onclick: async () => { app.pat.result = null; await store.setCurrentWh(inv.wh); app.go('inventory'); } }, many ? `查看“${inv.house.name}”的库存` : '查看库存')));
 }
 
 // ---------- 多选合计 ----------
@@ -552,7 +584,10 @@ async function renderTotals(app) {
       by.get(code).push({ name: p.name || '未命名', count: count * n });
     }
   }
-  const inv = await store.getInventory();
+  // 按哪个仓库的库存算（几个仓库时可以换）
+  const whs = await store.listWarehouses();
+  if (!whs.some(w => w.id === ui.totWh)) ui.totWh = (await store.currentWh()).id;
+  const inv = await store.getInventory(ui.totWh);
   const rows = store.previewRows(items, inv, settings).map(r => ({ ...r, buy: Math.max(0, r.threshold - r.after) }));
   const short = rows.filter(r => r.status === 'short');
   const low = rows.filter(r => r.status === 'low');
@@ -573,6 +608,10 @@ async function renderTotals(app) {
         h('button', { 'aria-label': '多拼一份', onclick: () => set(n + 1) }, '+')));
   })));
 
+  if (whs.length > 1) {
+    view.append(h('div.sec-row.tot-wh', { style: { marginTop: '12px' } }, h('span.small.muted', '按这个仓库的库存算'),
+      whButton(whs, ui.totWh, id => { ui.totWh = id; app.rerender(); })));
+  }
   view.append(h('div.totals', { style: { marginTop: '12px' } },
     h('div.stat', h('div.k', '一共需要'), h('div.v', fmtNum(totalNeed)), h('div.s.muted', `${rows.length} 种颜色`)),
     h('div.stat', h('div.k', '建议买'), h('div.v', { style: { color: totalBuy ? 'var(--bad-text)' : 'var(--ok-text)' } }, fmtNum(totalBuy)),
@@ -619,19 +658,19 @@ async function renderTotals(app) {
     h('thead', h('tr', h('th', '颜色'), h('th', '需要'), h('th', '现有'), h('th', '拼完剩'), h('th', '建议买'))),
     tbody)));
   view.append(h('p.small.muted',
-    `“建议买”= 拼完后补回到补货线（默认 ${settings.defaultThreshold} 颗）要买的数量；红色是不够拼，黄色是拼完会低于补货线。点一行可以看每张图纸各用多少。`,
+    `“建议买”= 拼完后补回到补货线（默认 ${inv.house.threshold ?? settings.defaultThreshold} 颗）要买的数量；红色是不够拼，黄色是拼完会低于补货线。点一行可以看每张图纸各用多少。`,
     Number(settings.lossPercent) > 0 ? `“需要”已按损耗 ${settings.lossPercent}% 向上取整。` : ''));
 
   view.append(h('div.sticky-actions',
     h('button.btn.big.block' + (toBuy.length ? '.primary' : ''), {
       disabled: !toBuy.length,
-      onclick: () => copyText(buyList(chosen, copiesOf, short, low)),
+      onclick: () => copyText(buyList(chosen, copiesOf, short, low, whs.length > 1 ? inv.house.name : null)),
     }, toBuy.length ? `复制采购清单（${toBuy.length} 色，${fmtNum(totalBuy)} 颗）` : '不用买豆子 👍')));
 }
 
-function buyList(chosen, copiesOf, short, low) {
+function buyList(chosen, copiesOf, short, low, whName = null) {
   const names = chosen.map(p => (p.name || '未命名') + (copiesOf(p) > 1 ? `×${copiesOf(p)}` : '')).join('、');
-  const lines = [`拼豆采购清单（${chosen.length} 张图纸：${names}）`];
+  const lines = [`拼豆采购清单（${chosen.length} 张图纸：${names}${whName ? `；按“${whName}”的库存` : ''}）`];
   if (short.length) lines.push('', '【不够拼，必须买】', ...short.map(r => `${r.code}：缺 ${-r.after} 颗，建议买 ${r.buy} 颗`));
   if (low.length) lines.push('', '【拼完会低于补货线】', ...low.map(r => `${r.code}：拼完剩 ${r.after} 颗，建议买 ${r.buy} 颗`));
   lines.push('', `合计建议买 ${[...short, ...low].reduce((a, r) => a + r.buy, 0)} 颗`);

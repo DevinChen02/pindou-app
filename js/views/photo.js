@@ -18,6 +18,7 @@ import { goPattern } from './patterns.js';
 import { beadBox, fits, resetSetup } from './boardsetup.js';
 import { readOnlyToast } from '../license.js';
 import { gridPage } from './pixelgrid.js';
+import { whButton } from './warehouse.js';
 
 /** 生成用的颜色里不放这些：珠光、果冻、夜光、温变、透明（效果特殊，“全部色卡”里才用） */
 export const SPECIAL_SERIES = ['P', 'R', 'Y', 'Q', 'T'];
@@ -34,7 +35,8 @@ function defaults(settings, native) {
   return {
     size: native ? 'native' : (SIZES.includes(d.size) || (d.size >= 4 && d.size <= LONG_MAX) ? d.size : 50),
     maxColors: native ? 0 : (COLOR_LIMITS.includes(d.maxColors) ? d.maxColors : 16),
-    set: ['normal', 'all', 'stock'].includes(d.set) ? d.set : 'normal',
+    set: ['normal', 'all', 'stock', 'card'].includes(d.set) ? d.set : 'normal',
+    wh: null, // 库存按哪个仓库（“有库存的”“仓库色卡”、颜色下面的“缺 N”）；null = 当前仓库
     bg: true, dither: native ? false : !!d.dither,
     // 保留线条（轮廓线连成一条、保持原来的颜色）、细节多少（精细 / 适中 / 简洁）
     lines: d.lines !== false, detail: detailOf(d),
@@ -215,11 +217,12 @@ function layoutOf(st) {
   return { rect: st.rect, ...gridSize(st.rect, L), inner: false, native: false };
 }
 
-/** 能用的颜色 */
+/** 能用的颜色：标准色 / 全部 / 仓库有库存的 / 仓库色卡里的（inv 是选中仓库的库存，inv.house 是仓库本身） */
 function codesFor(set, inv) {
   let codes = CODES.filter(c => !SPECIAL_SERIES.includes(seriesOf(c)));
   if (!codes.length || set === 'all') codes = [...CODES];
   if (set === 'stock') codes = CODES.filter(c => store.stockOf(inv, c) > 0);
+  if (set === 'card') codes = store.cardCodes(inv.house);
   return codes;
 }
 
@@ -331,7 +334,10 @@ async function genPage(app, st) {
     app.rec.photo = null; app.rec.step = 'pick'; app.render();
   });
   const view = clear(app.view);
-  const inv = await store.getInventory();
+  const whs = await store.listWarehouses();
+  const inv = await store.getInventory(whs.some(w => w.id === o.wh) ? o.wh : null);
+  // 仓库色卡是“全部”时没有“仓库色卡”这一项（和“全部”一样）
+  if (o.set === 'card' && (inv.house.card?.kind || 'all') === 'all') o.set = 'all';
   const { ready } = ensureResult(app, st, inv);
   const R = st.result;
   const nat = nativeOf(st);
@@ -384,12 +390,21 @@ async function genPage(app, st) {
   // 用哪些颜色
   const nStock = CODES.filter(c => store.stockOf(inv, c) > 0).length;
   const nNormal = CODES.filter(c => !SPECIAL_SERIES.includes(seriesOf(c))).length;
-  view.append(h('div.section-title', '用哪些颜色（当前色卡）'),
-    h('div.seg.pg-set',
-      h('button' + (o.set === 'normal' ? '.on' : ''), { 'data-set': 'normal', onclick: () => setOpt(app, st, { set: 'normal' }) }, `标准色 ${nNormal}`),
-      h('button' + (o.set === 'all' ? '.on' : ''), { 'data-set': 'all', onclick: () => setOpt(app, st, { set: 'all' }) }, `全部 ${CODES.length}`),
-      h('button' + (o.set === 'stock' ? '.on' : ''), { 'data-set': 'stock', disabled: !nStock, onclick: () => setOpt(app, st, { set: 'stock' }) }, `有库存的 ${nStock}`)),
-    h('div.tiny.muted', { style: { margin: '6px 2px 0' } }, o.set === 'all' ? '包括珠光、果冻、夜光等特殊效果的豆子。' : o.set === 'stock' ? '只用库存里还有的颜色（数量够不够看下面）。' : '不用珠光、果冻、夜光、温变、透明这些特殊效果的豆子。'));
+  // 几个仓库时：“有库存的”“仓库色卡”和下面的“缺 N”按哪个仓库（右边换）
+  const many = whs.length > 1, whName = inv.house.name;
+  const nCard = (inv.house.card?.kind || 'all') !== 'all' ? store.cardCodes(inv.house).length : 0;
+  const setBtns = [
+    h('button' + (o.set === 'normal' ? '.on' : ''), { 'data-set': 'normal', onclick: () => setOpt(app, st, { set: 'normal' }) }, `标准色 ${nNormal}`),
+    h('button' + (o.set === 'all' ? '.on' : ''), { 'data-set': 'all', onclick: () => setOpt(app, st, { set: 'all' }) }, `全部 ${CODES.length}`),
+    nCard ? h('button' + (o.set === 'card' ? '.on' : ''), { 'data-set': 'card', onclick: () => setOpt(app, st, { set: 'card' }) }, `仓库色卡 ${nCard}`) : null,
+    h('button' + (o.set === 'stock' ? '.on' : ''), { 'data-set': 'stock', disabled: !nStock, onclick: () => setOpt(app, st, { set: 'stock' }) }, `有库存的 ${nStock}`)];
+  view.append(h('div.sec-row', h('div.section-title', '用哪些颜色（当前色卡）'), whButton(whs, inv.wh, id => setOpt(app, st, { wh: id }), { title: '库存按哪个仓库' })),
+    // 四个选项时排成可以换行的一排（小屏放不下一条分段按钮）
+    nCard ? h('div.tag-pick.pg-set.pg-set4', setBtns.filter(Boolean).map(b => { b.classList.add('tagopt'); return b; })) : h('div.seg.pg-set', setBtns.filter(Boolean)),
+    h('div.tiny.muted', { style: { margin: '6px 2px 0' } }, o.set === 'all' ? '包括珠光、果冻、夜光等特殊效果的豆子。'
+      : o.set === 'stock' ? `只用${many ? `“${whName}”` : '库存'}里还有的颜色（数量够不够看下面）。`
+        : o.set === 'card' ? `只用“${whName}”色卡里的颜色（${store.cardLabel(inv.house)}）。`
+          : '不用珠光、果冻、夜光、温变、透明这些特殊效果的豆子。'));
 
   // 开关
   const sw = (cls, on, title, note, patch) => {
@@ -537,7 +552,7 @@ async function finish(app, st) {
     const o = st.opts;
     const gen = {
       v: 1, srcId: st.srcId, rect: R.L.rect, userRect: { ...st.rect }, cols, rows, native: !!R.L.native,
-      opts: { size: o.size, maxColors: o.maxColors, set: o.set, bg: o.bg, dither: o.dither, lines: o.lines, detail: o.detail, islands: o.islands !== false, exclude: [...o.exclude], replace: o.replace.map(x => [...x]) },
+      opts: { size: o.size, maxColors: o.maxColors, set: o.set, wh: o.wh || null, bg: o.bg, dither: o.dither, lines: o.lines, detail: o.detail, islands: o.islands !== false, exclude: [...o.exclude], replace: o.replace.map(x => [...x]) },
       ...(st.grid ? { grid: { px: st.grid.px, ox: st.grid.ox, py: st.grid.py, oy: st.grid.oy, ...(st.grid.user ? { user: true } : {}) } } : {}),
       at: Date.now(),
     };

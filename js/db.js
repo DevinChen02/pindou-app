@@ -1,19 +1,23 @@
 // 本地数据库（IndexedDB）。所有数据只存在这台手机的浏览器里。
-//   colors        每个色号的库存：{ code, stock, threshold|null, updatedAt }
-//   patterns      图纸：{ id, name, createdAt, status, items:[{code,count}], statedTotal, thumb, txId }
-//   transactions  库存流水：{ id, time, type, patternId, note, deltas:[{code, delta, before, after}], undone }
+//   stock         每个仓库每个色号的库存（v3 起）：{ wh, code, stock, threshold|null, updatedAt }，主键 [wh, code]
+//   colors        v2 以前的库存（每个色号一条，没有仓库）：v3 升级时整个拷进 stock 的“我的库存”（main），之后不再读写，留着当备份
+//   patterns      图纸：{ id, name, createdAt, status, items:[{code,count}], statedTotal, thumb, txId, build?:{ wh, … } }
+//   transactions  库存流水：{ id, time, type, wh, patternId, note, deltas:[{code, delta, before, after}], undone }（没有 wh 的是 main）
 //   images        图纸原图（JPEG dataURL）：{ id, dataUrl, w, h, name, createdAt }
-//   kv            设置、未完成的核对进度等：{ key, value }
+//   kv            设置、仓库列表（warehouses）、未完成的核对进度等：{ key, value }
 
 const DB_NAME = 'pindou-counter';
-const DB_VERSION = 2; // v2：新增 images（保存图纸原图，方便随时放大查看）
+// v2：新增 images（保存图纸原图，方便随时放大查看）
+// v3：多个仓库：新增 stock（[仓库, 色号] 一条），colors 里的库存搬进“我的库存”（main）
+const DB_VERSION = 3;
+export const MAIN_WH = 'main';
 let dbPromise = null;
 
 export function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const r = indexedDB.open(DB_NAME, DB_VERSION);
-    r.onupgradeneeded = () => {
+    r.onupgradeneeded = e => {
       const db = r.result;
       if (!db.objectStoreNames.contains('colors')) db.createObjectStore('colors', { keyPath: 'code' });
       if (!db.objectStoreNames.contains('patterns')) db.createObjectStore('patterns', { keyPath: 'id', autoIncrement: true });
@@ -23,6 +27,20 @@ export function openDB() {
       }
       if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv', { keyPath: 'key' });
       if (!db.objectStoreNames.contains('images')) db.createObjectStore('images', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('stock')) {
+        const st = db.createObjectStore('stock', { keyPath: ['wh', 'code'] });
+        st.createIndex('wh', 'wh');
+        // 老数据（v1、v2）：每个色号的库存原样搬进“我的库存”。和建表在同一个升级事务里：要么全搬完，要么数据库还是老版本
+        if (e.oldVersion > 0) {
+          const c = r.transaction.objectStore('colors').openCursor();
+          c.onsuccess = () => {
+            const cur = c.result;
+            if (!cur) return;
+            st.put({ ...cur.value, wh: MAIN_WH });
+            cur.continue();
+          };
+        }
+      }
     };
     r.onsuccess = () => {
       const db = r.result;
@@ -82,6 +100,12 @@ export async function transaction(stores, fn) {
   });
 }
 
+/** 按索引取一批（比如某个仓库的全部库存） */
+export async function getAllByIndex(store, index, key) {
+  const db = await openDB();
+  return wrap(db.transaction(store).objectStore(store).index(index).getAll(key));
+}
+
 export async function getAllKeys(store) {
   const db = await openDB();
   return wrap(db.transaction(store).objectStore(store).getAllKeys());
@@ -104,7 +128,7 @@ export async function forEach(store, fn) {
 
 export async function clearAll() {
   const db = await openDB();
-  const stores = ['colors', 'patterns', 'transactions', 'kv', 'images'];
+  const stores = ['colors', 'stock', 'patterns', 'transactions', 'kv', 'images'];
   await new Promise((resolve, reject) => {
     const t = db.transaction(stores, 'readwrite');
     for (const s of stores) t.objectStore(s).clear();

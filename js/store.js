@@ -1,6 +1,7 @@
 // 业务逻辑：设置、库存增减（带流水，可撤销）、图纸、备份。
 import * as db from './db.js';
-import { PALETTE, isCode, codeCompare, setPalette, paletteEntries, DEFAULT_ENTRIES, DEFAULT_HEX, CODE_RE } from './palette.js';
+import { PALETTE, CODES, BASE_SERIES, seriesOf, isCode, codeCompare, setPalette, paletteEntries, DEFAULT_ENTRIES, DEFAULT_HEX, CODE_RE } from './palette.js';
+import { MAIN_WH } from './db.js';
 
 // ---------- 只能查看（试用到期 / 被停用）：所有会改数据的操作都拦下来 ----------
 let readOnlyMsg = null;
@@ -40,6 +41,7 @@ export const DEFAULT_SETTINGS = {
   dewatermark: true,                // 生成拼豆板时去水印（识别时不受水印影响）
   pegboards: [[52, 52], [78, 78], [104, 104]], // 常用拼豆板尺寸，存的是 [列, 行]（界面上都先写行再写列）
   cellModel: 'v6s',                 // 读拼豆板格子上的色号用的识字模型：v6s（高精度，PP-OCRv6 small）| v5m（标准，PP-OCRv5 mobile）
+  currentWh: 'main',                // 当前仓库（库存页显示的、别的地方默认用的）。defaultThreshold / restockPresets 是新建仓库时的默认值
 };
 
 function merge(base, over) {
@@ -70,18 +72,179 @@ export function enabledMethods(s) {
   return ['vlm', 'ocr', 'text'].filter(m => s.methods[m].enabled);
 }
 
+// ---------- 仓库 ----------
+// 一个人可以有好几个互相独立的仓库（家里 / 工作室 / 某个品牌的一套）：每个仓库自己的库存、每色补货线、流水。
+// 仓库列表存在 kv 的 warehouses：[{ id, name, card, threshold, presets, createdAt, deleted? }]
+//   card（这个仓库有哪些颜色，从全 App 共用的色卡里选）：{ kind: 'all' } | { kind: 'base' }（A–M 基础色）
+//        | { kind: 'series', series: ['A', …] } | { kind: 'codes', codes: ['H7', …] }
+//   删掉的仓库留在列表里（deleted: true），流水里还能显示它的名字
+export { MAIN_WH };
+let whCache = null;
+
+/** 仓库列表（默认不含删掉的）。第一次用时建好“我的库存”（老数据升级后都在它里面） */
+export async function listWarehouses({ all = false } = {}) {
+  if (!whCache) {
+    const rec = await db.get('kv', 'warehouses');
+    whCache = rec?.value?.length ? rec.value : null;
+    if (!whCache) {
+      const s = await getSettings();
+      whCache = [{ id: MAIN_WH, name: '我的库存', card: { kind: 'all' }, threshold: s.defaultThreshold, presets: [...s.restockPresets], createdAt: Date.now() }];
+      await db.put('kv', { key: 'warehouses', value: whCache });
+    }
+  }
+  return all ? whCache : whCache.filter(w => !w.deleted);
+}
+async function saveWarehouses(list) {
+  whCache = list;
+  await db.put('kv', { key: 'warehouses', value: list });
+}
+/** 一个仓库（删掉的也能取到：显示流水里的名字） */
+export async function getWarehouse(id) {
+  return (await listWarehouses({ all: true })).find(w => w.id === id) || null;
+}
+/** 仓库的名字（删掉的写“（已删除）”） */
+export function whLabel(w) { return w ? w.name + (w.deleted ? '（已删除）' : '') : '（未知仓库）'; }
+/** 当前仓库（库存页显示的那个；记的那个被删了就用第一个） */
+export async function currentWh() {
+  const s = await getSettings();
+  const list = await listWarehouses();
+  return list.find(w => w.id === s.currentWh) || list[0];
+}
+/** 换当前仓库（只是换着看，只能查看时也可以） */
+export async function setCurrentWh(id) {
+  const s = await getSettings();
+  if (s.currentWh === id) return;
+  s.currentWh = id;
+  await saveSettings(s);
+}
+/** 某个仓库能不能用（存在、没删）；不能用就用当前仓库 */
+export async function resolveWh(id) {
+  const w = id ? await getWarehouse(id) : null;
+  return w && !w.deleted ? w : currentWh();
+}
+
+const cleanCard = card => {
+  const k = card?.kind;
+  if (k === 'base') return { kind: 'base' };
+  if (k === 'series') return { kind: 'series', series: [...new Set((card.series || []).map(String))] };
+  if (k === 'codes') return { kind: 'codes', codes: [...new Set((card.codes || []).map(c => String(c).toUpperCase()))] };
+  return { kind: 'all' };
+};
+const cleanPresets = ps => {
+  const out = (Array.isArray(ps) ? ps : []).map(n => Math.round(+n)).filter(n => n > 0).slice(0, 6);
+  return out.length ? out : [100, 500, 1000];
+};
+const cleanName = (name, list, selfId = null) => {
+  const n = String(name || '').trim().slice(0, 20);
+  if (!n) throw new Error('给仓库起个名字');
+  if (list.some(w => !w.deleted && w.id !== selfId && w.name === n)) throw new Error(`已经有叫“${n}”的仓库了`);
+  return n;
+};
+
+/** 新建仓库，返回 id。没给的设置照着当前仓库 */
+export async function createWarehouse({ name, card = null, threshold = null, presets = null } = {}) {
+  guard();
+  const list = await listWarehouses({ all: true });
+  const cur = await currentWh();
+  const t = threshold == null || threshold === '' ? cur.threshold : Math.max(0, Math.round(+threshold));
+  const w = {
+    id: `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    name: cleanName(name, list), card: cleanCard(card || { kind: 'all' }),
+    threshold: Number.isFinite(t) ? t : 100, presets: cleanPresets(presets || cur.presets), createdAt: Date.now(),
+  };
+  await saveWarehouses([...list, w]);
+  return w.id;
+}
+
+/** 改仓库的名字 / 色卡 / 默认补货线 / 快捷按钮 */
+export async function updateWarehouse(id, patch) {
+  guard();
+  const list = await listWarehouses({ all: true });
+  const w = list.find(x => x.id === id && !x.deleted);
+  if (!w) throw new Error('这个仓库不在了');
+  const nw = { ...w };
+  if ('name' in patch) nw.name = cleanName(patch.name, list, id);
+  if ('card' in patch) nw.card = cleanCard(patch.card);
+  if ('threshold' in patch) {
+    const t = Math.round(+patch.threshold);
+    if (!(t >= 0)) throw new Error('补货线要是 0 或正数');
+    nw.threshold = t;
+  }
+  if ('presets' in patch) nw.presets = cleanPresets(patch.presets);
+  await saveWarehouses(list.map(x => (x.id === id ? nw : x)));
+  return nw;
+}
+
+/**
+ * 删掉一个仓库：它的库存一起删掉，流水留着（显示“（已删除）”）。最后一个仓库不能删。
+ * 当前仓库是它的话换成剩下的第一个。返回删掉的颗数
+ */
+export async function deleteWarehouse(id) {
+  guard();
+  const list = await listWarehouses({ all: true });
+  const live = list.filter(w => !w.deleted);
+  if (!live.some(w => w.id === id)) throw new Error('这个仓库不在了');
+  if (live.length <= 1) throw new Error('至少要留一个仓库');
+  const rows = await db.getAllByIndex('stock', 'wh', id);
+  const beads = rows.reduce((a, r) => a + (r.stock || 0), 0);
+  await db.transaction(['stock'], t => { const st = t.objectStore('stock'); for (const r of rows) st.delete([id, r.code]); });
+  await saveWarehouses(list.map(w => (w.id === id ? { ...w, deleted: true, deletedAt: Date.now() } : w)));
+  const s = await getSettings();
+  if (s.currentWh === id) await setCurrentWh(live.find(w => w.id !== id).id);
+  return beads;
+}
+
+/** 仓库色卡里的色号（按色卡顺序；色卡管理里没有的色号不算） */
+export function cardCodes(w) {
+  const c = w?.card || { kind: 'all' };
+  if (c.kind === 'base') return CODES.filter(code => BASE_SERIES.includes(seriesOf(code)));
+  if (c.kind === 'series') { const set = new Set(c.series || []); return CODES.filter(code => set.has(seriesOf(code))); }
+  if (c.kind === 'codes') { const set = new Set(c.codes || []); return CODES.filter(code => set.has(code)); }
+  return [...CODES];
+}
+/** 色卡怎么说：“全部 280 色”“MARD 基础 221 色”“A、B 系列 · 58 色”“自选 30 色” */
+export function cardLabel(w) {
+  const c = w?.card || { kind: 'all' }, n = cardCodes(w).length;
+  if (c.kind === 'base') return `基础色 A–M · ${n} 色`;
+  if (c.kind === 'series') return `${(c.series || []).join('、') || '没选'} 系列 · ${n} 色`;
+  if (c.kind === 'codes') return `自选 ${n} 色`;
+  return `全部 ${n} 色`;
+}
+
+/** 每个仓库的概况（仓库列表用）：[{ w, colors: 有库存的色数, beads: 颗数, low: 待补货几色 }] */
+export async function warehouseSummaries(settings) {
+  const list = await listWarehouses();
+  const all = await db.getAll('stock');
+  return list.map(w => {
+    const inv = new Map(all.filter(r => r.wh === w.id).map(r => [r.code, r]));
+    inv.wh = w.id; inv.house = w;
+    let colors = 0, beads = 0;
+    for (const r of inv.values()) if ((r.stock || 0) > 0) { colors++; beads += r.stock; }
+    return { w, colors, beads, low: lowStockList(inv, settings).length };
+  });
+}
+
 // ---------- 库存 ----------
 
-export async function getInventory() {
-  const all = await db.getAll('colors');
-  return new Map(all.map(r => [r.code, r]));
+/**
+ * 一个仓库的库存：Map 色号 → { wh, code, stock, threshold }。不给仓库就是当前仓库。
+ * 返回的 Map 上带着 .wh（仓库 id）和 .house（仓库本身：默认补货线、色卡），thresholdOf 等不用另外传仓库
+ */
+export async function getInventory(wh = null) {
+  const house = await resolveWh(wh);
+  const rows = await db.getAllByIndex('stock', 'wh', house.id);
+  const m = new Map(rows.map(r => [r.code, r]));
+  m.wh = house.id;
+  m.house = house;
+  return m;
 }
 
 export function stockOf(inv, code) { return inv.get(code)?.stock ?? 0; }
 
+/** 补货线：这一色自己设的 → 仓库的默认补货线 → 设置里的默认值 */
 export function thresholdOf(inv, code, settings) {
   const t = inv.get(code)?.threshold;
-  return t == null || t === '' ? settings.defaultThreshold : t;
+  return t == null || t === '' ? (inv.house?.threshold ?? settings.defaultThreshold) : t;
 }
 
 /** 需要颗数 = 图纸数量 ×（1 + 损耗%），向上取整 */
@@ -124,12 +287,15 @@ export function lowStockList(inv, settings, onlyOwned = false) {
 }
 
 /**
- * 原子地改库存并记一条流水。
+ * 原子地改一个仓库的库存并记一条流水（流水上记着仓库 wh）。不给仓库就是当前仓库。
  * changes: [{ code, delta }]（加减）或 [{ code, set }]（设为）
  * 如果 forbidNegative 且有颜色会变成负数，整笔操作取消并抛错（err.shortages 列出缺口）。
  */
-export async function applyChanges(changesIn, { type, note = '', patternId = null, forbidNegative = false, clampZero = false, patternPatch = null, extra = {} } = {}) {
+export async function applyChanges(changesIn, { wh = null, type, note = '', patternId = null, forbidNegative = false, clampZero = false, patternPatch = null, extra = {} } = {}) {
   guard();
+  const house = wh ? await getWarehouse(wh) : await currentWh();
+  if (!house || house.deleted) throw new Error('这个仓库已经删掉了');
+  const W = house.id;
   const time = Date.now();
   // 同一色号出现多次时合并
   const byCode = new Map();
@@ -140,8 +306,8 @@ export async function applyChanges(changesIn, { type, note = '', patternId = nul
     else byCode.set(ch.code, { code: ch.code, delta: (prev?.delta || 0) + ch.delta });
   }
   const changes = [...byCode.values()];
-  return db.transaction(['colors', 'transactions', 'patterns'], (t, done, abort) => {
-    const cs = t.objectStore('colors');
+  return db.transaction(['stock', 'transactions', 'patterns'], (t, done, abort) => {
+    const cs = t.objectStore('stock');
     const deltas = [];
     let pending = changes.length;
     const shortages = [];
@@ -154,10 +320,10 @@ export async function applyChanges(changesIn, { type, note = '', patternId = nul
         return;
       }
       for (const d of deltas) {
-        cs.put({ ...d.rec, code: d.code, stock: d.after, updatedAt: time });
+        cs.put({ ...d.rec, wh: W, code: d.code, stock: d.after, updatedAt: time });
       }
       const txRec = {
-        time, type, note, patternId,
+        time, type, note, patternId, wh: W,
         deltas: deltas.map(d => ({ code: d.code, delta: d.after - d.before, before: d.before, after: d.after })),
         ...extra,
       };
@@ -177,9 +343,9 @@ export async function applyChanges(changesIn, { type, note = '', patternId = nul
     };
     for (const ch of changes) {
       if (!isCode(ch.code)) { abort(new Error(`未知色号 ${ch.code}`)); return; }
-      const g = cs.get(ch.code);
+      const g = cs.get([W, ch.code]);
       g.onsuccess = () => {
-        const rec = g.result || { code: ch.code, stock: 0, threshold: null };
+        const rec = g.result || { wh: W, code: ch.code, stock: 0, threshold: null };
         const before = rec.stock ?? 0;
         let after = ch.set != null ? Math.max(0, Math.round(ch.set)) : before + Math.round(ch.delta);
         if (clampZero && after < 0 && before >= 0) after = 0; // 库存记录比实际少：扣到 0 为止
@@ -191,24 +357,26 @@ export async function applyChanges(changesIn, { type, note = '', patternId = nul
   });
 }
 
-/** 确认拼豆：按图纸扣库存。不够就整笔取消。 */
-export async function commitPattern(patternId, rows) {
-  guard();
-  return applyChanges(rows.map(r => ({ code: r.code, delta: -r.need })), {
-    type: 'consume', patternId, forbidNegative: true,
-  });
-}
+/** 流水是哪个仓库的（老流水没有 wh：“我的库存”） */
+export const txWh = tx => tx.wh || MAIN_WH;
 
-/** 撤销一笔流水（把它的变化反向加回去） */
+/**
+ * 撤销一笔流水（把它的变化反向加回去）：加回那笔流水的仓库，不管现在当前仓库是哪个。
+ * 那个仓库已经删掉了：只把这笔记成已撤销、图纸状态改回去，豆子没地方加（返回 null）
+ */
 export async function undoTransaction(txId) {
   guard();
   const tx = await db.get('transactions', txId);
   if (!tx) throw new Error('找不到这笔记录');
   if (tx.undone) throw new Error('这笔记录已经撤销过了');
-  const id = await applyChanges(tx.deltas.map(d => ({ code: d.code, delta: -d.delta })), {
-    type: 'undo', note: `撤销：${txLabel(tx)}`, extra: { undoOf: txId },
-  });
-  await db.put('transactions', { ...tx, undone: true, undoneBy: id });
+  const house = await getWarehouse(txWh(tx));
+  let id = null;
+  if (house && !house.deleted) {
+    id = await applyChanges(tx.deltas.map(d => ({ code: d.code, delta: -d.delta })), {
+      wh: house.id, type: 'undo', note: `撤销：${txLabel(tx)}`, extra: { undoOf: txId },
+    });
+  }
+  await db.put('transactions', { ...tx, undone: true, undoneBy: id, ...(id == null ? { undoNote: '仓库已删除，豆子没有加回去' } : {}) });
   if (tx.patternId != null) {
     const p = await db.get('patterns', tx.patternId);
     if (p) await db.put('patterns', patternAfterUndo(p, tx));
@@ -216,10 +384,12 @@ export async function undoTransaction(txId) {
   return id;
 }
 
-export async function setThreshold(code, threshold) {
+/** 一个仓库里某一色自己的补货线（null = 用仓库的默认补货线）。不给仓库就是当前仓库 */
+export async function setThreshold(code, threshold, wh = null) {
   guard();
-  const rec = (await db.get('colors', code)) || { code, stock: 0 };
-  await db.put('colors', { ...rec, threshold: threshold === '' || threshold == null ? null : Math.max(0, Math.round(threshold)), updatedAt: Date.now() });
+  const W = (await resolveWh(wh)).id;
+  const rec = (await db.get('stock', [W, code])) || { wh: W, code, stock: 0 };
+  await db.put('stock', { ...rec, threshold: threshold === '' || threshold == null ? null : Math.max(0, Math.round(threshold)), updatedAt: Date.now() });
 }
 
 export const TX_TYPES = { consume: '拼豆扣减', restock: '补货', adjust: '手动调整', undo: '撤销', import: '批量录入' };
@@ -229,9 +399,10 @@ export function txLabel(tx) {
   return `${TX_TYPES[tx.type] || tx.type}${tx.note ? ' · ' + tx.note : ''}（${tx.deltas.length} 色，${n > 0 ? '+' : ''}${n} 颗）`;
 }
 
-export async function listTransactions() {
+/** 流水（新的在前）。给了 wh 只要那个仓库的 */
+export async function listTransactions({ wh = null } = {}) {
   const all = await db.getAll('transactions');
-  return all.sort((a, b) => b.time - a.time);
+  return (wh ? all.filter(t => txWh(t) === wh) : all).sort((a, b) => b.time - a.time);
 }
 
 // ---------- 图纸 ----------
@@ -550,17 +721,20 @@ export async function revertToPending(id) {
  * 结算：把这些颗数从库存扣掉，记一笔流水，更新拼豆进度。
  * amounts: { 色号: 颗数 }；finish=true 表示这幅图结束了（全部拼好，或不拼了）
  */
-export async function settleBuild(id, amounts, { finish = false, partial = false, abandon = false, note = '' } = {}) {
+export async function settleBuild(id, amounts, { wh = null, finish = false, partial = false, abandon = false, note = '' } = {}) {
   guard();
+  // 从哪个仓库扣：给了就用它，否则这次拼豆上次结算的仓库，再否则当前仓库；记在图纸上（下次结算默认还是它）
+  const p0 = await db.get('patterns', id);
+  const W = (await resolveWh(wh || p0?.build?.wh)).id;
   const changes = Object.entries(amounts).filter(([, n]) => n > 0).map(([code, n]) => ({ code, delta: -n }));
   const patch = (p, txId, time, txDeltas) => {
     const b = p.build || { startedAt: time, done: [], deducted: {}, txIds: [] };
     const deducted = { ...(b.deducted || {}) };
     for (const d of txDeltas) deducted[d.code] = (deducted[d.code] || 0) - d.delta;
-    const nb = { ...b, deducted, txIds: txId != null ? [...(b.txIds || []), txId] : (b.txIds || []) };
+    const nb = { ...b, wh: W, deducted, txIds: txId != null ? [...(b.txIds || []), txId] : (b.txIds || []) };
     if (abandon) {
       // 这次不拼了：扣掉的就扣掉了（记在历史里），图纸放回“待拼”，下次开始拼豆是全新的一次
-      const hist = { startedAt: nb.startedAt, endedAt: time, done: nb.done || [], deducted, txIds: nb.txIds };
+      const hist = { startedAt: nb.startedAt, endedAt: time, done: nb.done || [], deducted, txIds: nb.txIds, wh: W };
       return { ...p, build: null, status: 'pending', txId: null, doneAt: null, history: [...(p.history || []), hist] };
     }
     if (finish) Object.assign(nb, { finishedAt: time, partial });
@@ -570,7 +744,12 @@ export async function settleBuild(id, amounts, { finish = false, partial = false
     // 什么都不用扣（比如全都已经扣过了）：只改状态
     return patchPattern(id, p => patch(p, null, Date.now(), [])).then(() => null);
   }
-  return applyChanges(changes, { type: 'consume', patternId: id, clampZero: true, patternPatch: patch, note });
+  return applyChanges(changes, { wh: W, type: 'consume', patternId: id, clampZero: true, patternPatch: patch, note });
+}
+
+/** 这张图纸的库存默认按哪个仓库看：这次拼豆结算过的仓库（还在的话），否则当前仓库 */
+export async function patternWh(p) {
+  return resolveWh(p?.build?.wh || null);
 }
 
 export async function savePattern(p) {
@@ -695,15 +874,23 @@ export async function upsertColor({ oldCode = null, code, hex, name = '' }) {
   const entries = paletteEntries().filter(e => e.code !== oldCode && e.code !== code);
   entries.push({ code, hex, ...(name ? { name } : {}) });
   if (oldCode && oldCode !== code) {
-    const rec = await db.get('colors', oldCode);
-    if (rec) {
-      const exist = await db.get('colors', code);
-      await db.put('colors', { ...rec, code, stock: (rec.stock || 0) + (exist?.stock || 0), updatedAt: Date.now() });
-      await db.del('colors', oldCode);
-      await db.put('transactions', {
-        time: Date.now(), type: 'adjust', note: `色号改名 ${oldCode} → ${code}`,
-        deltas: [{ code: oldCode, delta: -(rec.stock || 0), before: rec.stock || 0, after: 0 }, { code, delta: rec.stock || 0, before: exist?.stock || 0, after: (rec.stock || 0) + (exist?.stock || 0) }],
-      });
+    // 每个仓库里这个色号的库存都搬到新色号（新色号已经有库存的加在一起），各记一笔流水
+    for (const rec of (await db.getAll('stock')).filter(r => r.code === oldCode)) {
+      const exist = await db.get('stock', [rec.wh, code]);
+      const n = rec.stock || 0, before = exist?.stock || 0;
+      await db.put('stock', { ...rec, code, stock: n + before, threshold: exist?.threshold ?? rec.threshold ?? null, updatedAt: Date.now() });
+      await db.del('stock', [rec.wh, oldCode]);
+      if (n) {
+        await db.put('transactions', {
+          time: Date.now(), type: 'adjust', wh: rec.wh, note: `色号改名 ${oldCode} → ${code}`,
+          deltas: [{ code: oldCode, delta: -n, before: n, after: 0 }, { code, delta: n, before, after: n + before }],
+        });
+      }
+    }
+    // 仓库的自选色卡里也跟着改名
+    const list = await listWarehouses({ all: true });
+    if (list.some(w => w.card?.kind === 'codes' && w.card.codes.includes(oldCode))) {
+      await saveWarehouses(list.map(w => (w.card?.kind === 'codes' && w.card.codes.includes(oldCode) ? { ...w, card: { kind: 'codes', codes: [...new Set(w.card.codes.map(c => (c === oldCode ? code : c)))] } } : w)));
     }
   }
   setPalette(entries);
@@ -711,18 +898,21 @@ export async function upsertColor({ oldCode = null, code, hex, name = '' }) {
   return code;
 }
 
-/** 删除颜色；库存里有这个色号的记录会一起删除（记一条流水） */
+/** 删除颜色；每个仓库里这个色号的库存记录都一起删除（有库存的各记一条流水），仓库的自选色卡里也去掉 */
 export async function deleteColor(code) {
   guard();
-  const rec = await db.get('colors', code);
-  if (rec) {
-    await db.del('colors', code);
+  for (const rec of (await db.getAll('stock')).filter(r => r.code === code)) {
+    await db.del('stock', [rec.wh, code]);
     if (rec.stock) {
       await db.put('transactions', {
-        time: Date.now(), type: 'adjust', note: `删除色号 ${code}`,
+        time: Date.now(), type: 'adjust', wh: rec.wh, note: `删除色号 ${code}`,
         deltas: [{ code, delta: -rec.stock, before: rec.stock, after: 0 }],
       });
     }
+  }
+  const list = await listWarehouses({ all: true });
+  if (list.some(w => w.card?.kind === 'codes' && w.card.codes.includes(code))) {
+    await saveWarehouses(list.map(w => (w.card?.kind === 'codes' ? { ...w, card: { kind: 'codes', codes: w.card.codes.filter(c => c !== code) } } : w)));
   }
   setPalette(paletteEntries().filter(e => e.code !== code));
   await persistPalette();
@@ -765,8 +955,13 @@ export async function resetPalette() {
   setPalette(DEFAULT_ENTRIES);
 }
 
-/** 某个色号当前的库存（用于删除/改名前提示） */
-export async function stockRecord(code) { return db.get('colors', code); }
+/** 某个色号在各个仓库里的库存（用于删除/改名前提示）：{ stock: 一共几颗, by: [{ name, stock }] } */
+export async function stockRecord(code) {
+  const list = await listWarehouses({ all: true });
+  const by = (await db.getAll('stock')).filter(r => r.code === code && (r.stock || 0) > 0)
+    .map(r => ({ name: whLabel(list.find(w => w.id === r.wh)), stock: r.stock }));
+  return { stock: by.reduce((a, x) => a + x.stock, 0), by };
+}
 
 // ---------- 备份 ----------
 
@@ -776,9 +971,13 @@ export async function exportData({ includeSecrets = false, includeImages = false
     settings.methods.vlm.apiKeys = { anthropic: '', openai: '', gemini: '' };
     settings.methods.vlm.workerToken = '';
   }
+  const stock = await db.getAll('stock');
   return {
-    app: 'pindou-counter', version: 1, exportedAt: new Date().toISOString(),
-    colors: await db.getAll('colors'),
+    app: 'pindou-counter', version: 2, exportedAt: new Date().toISOString(),
+    // 多个仓库（v2.14 起）：仓库列表 + 每个仓库的库存；colors 是“我的库存”那一份（旧版本的 App 导入这个备份也能用）
+    warehouses: await listWarehouses({ all: true }),
+    stock,
+    colors: stock.filter(r => r.wh === MAIN_WH).map(({ wh, ...r }) => r),
     palette: paletteDiff().custom ? paletteEntries() : null,
     patterns: await db.getAll('patterns'),
     transactions: await db.getAll('transactions'),
@@ -796,7 +995,11 @@ export async function importData(data) {
     setPalette(data.palette);
     await persistPalette();
   } else setPalette(DEFAULT_ENTRIES);
-  for (const c of data.colors || []) await db.put('colors', c);
+  // 库存：新备份按仓库存；旧备份（没有仓库）的库存都进“我的库存”
+  if (Array.isArray(data.stock)) { for (const r of data.stock) if (r?.wh && r.code) await db.put('stock', r); }
+  else for (const c of data.colors || []) if (c?.code) await db.put('stock', { ...c, wh: MAIN_WH });
+  whCache = null;
+  if (Array.isArray(data.warehouses) && data.warehouses.some(w => !w.deleted)) await saveWarehouses(data.warehouses);
   for (const p of data.patterns || []) await db.put('patterns', p);
   for (const t of data.transactions || []) await db.put('transactions', t);
   for (const im of data.images || []) await db.put('images', im);
@@ -812,5 +1015,6 @@ export async function resetAll() {
   guard();
   await db.clearAll();
   settingsCache = null;
+  whCache = null;
   setPalette(DEFAULT_ENTRIES);
 }

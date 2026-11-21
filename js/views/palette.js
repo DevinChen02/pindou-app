@@ -137,7 +137,7 @@ function editSheet(app, code, presetCode = '') {
       const rec = await store.stockRecord(p.code);
       const ok = await confirmDialog(`把 ${p.code} 改成 ${newCode}？`, {
         ok: '改名',
-        detail: rec?.stock ? `库存里的 ${fmtNum(rec.stock)} 颗会一起转到 ${newCode}。已保存的图纸和流水里仍显示旧色号。` : '已保存的图纸和流水里仍显示旧色号。',
+        detail: rec?.stock ? `库存里的 ${fmtNum(rec.stock)} 颗${rec.by.length > 1 ? `（${rec.by.map(x => `${x.name} ${fmtNum(x.stock)}`).join('、')}）` : ''}会一起转到 ${newCode}。已保存的图纸和流水里仍显示旧色号。` : '已保存的图纸和流水里仍显示旧色号。',
       });
       if (!ok) return;
     }
@@ -154,7 +154,7 @@ function editSheet(app, code, presetCode = '') {
     const ok = await confirmDialog(`从色卡删除 ${p.code}？`, {
       ok: '删除', danger: true,
       detail: rec?.stock
-        ? `库存里还有 ${fmtNum(rec.stock)} 颗 ${p.code}，删除后这条库存也会一起删除（会记入流水）。`
+        ? `库存里还有 ${fmtNum(rec.stock)} 颗 ${p.code}${rec.by.length > 1 ? `（${rec.by.map(x => `${x.name} ${fmtNum(x.stock)}`).join('、')}）` : ''}，删除后${rec.by.length > 1 ? '每个仓库里' : ''}这条库存也会一起删除（会记入流水）。`
         : DEFAULT_HEX.has(p.code) ? '这是内置色号，之后可以用“恢复默认色卡”找回。' : '删除后识别和库存里都不再有这个色号。',
     });
     if (!ok) return;

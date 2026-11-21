@@ -55,7 +55,8 @@ export async function replaceFlow(app, p, { from = null, onChanged = null } = {}
   if (!from) return false;
   if (store.colorTouched(p, from)) { toast(`${from} 已经打了“拼好”的勾（或者扣过库存），不能整种换`, 'error'); return false; }
   const counts = new Map(colorsOf(p).map(r => [r.code, r.n]));
-  const inv = await store.getInventory();
+  // 库存按这张图纸的仓库（这次拼豆结算过的，否则当前仓库）
+  const inv = await store.getInventory((await store.patternWh(p)).id);
   const anyStock = [...inv.values()].some(x => (x.stock || 0) > 0);
   const here = [...counts.keys()].filter(c => c !== from);
   const near = isCode(from) ? nearestCodes(rgbOf(from), 9).map(x => x.code).filter(c => c !== from) : [];

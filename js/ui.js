@@ -102,11 +102,13 @@ export function optionSheet(title, groups) {
   return s;
 }
 
-export function confirmDialog(message, { ok = '确定', cancel = '取消', danger = false, detail } = {}) {
+/** 确认框。extra：放在说明下面的一块（比如“从哪个仓库扣”）；detail 可以是函数（extra 里改了选择时重新写说明） */
+export function confirmDialog(message, { ok = '确定', cancel = '取消', danger = false, detail, extra = null } = {}) {
   return new Promise(resolve => {
     const s = sheet([
       h('p.confirm-msg', message),
       detail ? h('div.confirm-detail', detail) : null,
+      extra,
       h('div.row.gap.end',
         h('button.btn.ghost', { onclick: () => s.close(false) }, cancel),
         h('button.btn' + (danger ? '.danger' : '.primary'), { onclick: () => s.close(true) }, ok)),

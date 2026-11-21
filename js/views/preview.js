@@ -5,6 +5,7 @@ import { itemsSig } from './overview.js';
 import { openImageViewer, entriesFromImages, hasViewable } from '../viewer.js';
 import { tagSheet, goPattern } from './patterns.js';
 import { backToPhoto } from './photo.js';
+import { whButton } from './warehouse.js';
 
 function sessionItems(s) {
   // 清单色块的颜色跟着存进图纸：生成拼豆板时当这一色在图上的参考色
@@ -26,7 +27,9 @@ export async function renderPreview(app) {
   if (s.method === 'photo') app.setBack(() => backToPhoto(app));
   else app.setBack(() => { app.rec.step = 'verify'; s.mode = 'list'; app.saveSession(); app.render(); });
   const view = clear(app.view);
-  const inv = await store.getInventory();
+  // 对照哪个仓库的库存（几个仓库时可以换；只是对照，不扣库存）
+  const whs = await store.listWarehouses();
+  const inv = await store.getInventory(whs.some(w => w.id === s.whView) ? s.whView : null);
   const rows = store.previewRows(sessionItems(s), inv, settings);
   const short = rows.filter(r => r.status === 'short');
   const low = rows.filter(r => r.status === 'low');
@@ -46,6 +49,10 @@ export async function renderPreview(app) {
     view.append(h('button.pv-gen', { onclick: () => openImageViewer(entriesFromImages(s.images), { view: 'full', focus: false }) },
       h('img', { src: s.images[0].thumb, alt: '' }),
       h('div.grow', h('b', `${s.gen?.cols} × ${s.gen?.rows} 格`), h('div.small.muted', `${fmtNum(totalNeed)} 颗 · ${rows.length} 色 · 由图片生成`), h('div.tiny.muted', '点开看图纸（每格写着色号）和原图'))));
+  }
+  if (whs.length > 1) {
+    view.append(h('div.sec-row.pv-wh', { style: { margin: '10px 0 4px' } }, h('span.small.muted', '对照库存'),
+      whButton(whs, inv.wh, id => { s.whView = id; app.saveSession(); app.rerender(); })));
   }
   if (short.length) {
     const lack = short.reduce((a, r) => a + -r.after, 0);
@@ -69,7 +76,7 @@ export async function renderPreview(app) {
       h('td.after' + (r.after < 0 ? '.neg' : r.status === 'low' ? '.low' : ''), r.after < 0 ? `缺 ${fmtNum(-r.after)}` : fmtNum(r.after)),
       h('td.stcell', h('span.tag.' + STATUS[r.status].tag, STATUS[r.status].text))))));
   view.append(h('div.table-wrap', table));
-  view.append(h('p.small.muted', `共 ${rows.length} 色、${fmtNum(totalNeed)} 颗。补货线：默认 ${settings.defaultThreshold} 颗（可在库存里为单个颜色另设）。`));
+  view.append(h('p.small.muted', `共 ${rows.length} 色、${fmtNum(totalNeed)} 颗。补货线：默认 ${inv.house.threshold ?? settings.defaultThreshold} 颗（可在库存里为单个颜色另设）。`));
 
   // 分类（保存时一起存）
   const tagRow = h('div.pd-tags', { style: { margin: '10px 0 2px' } });

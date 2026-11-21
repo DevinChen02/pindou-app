@@ -1,25 +1,37 @@
-// “库存”标签：每个色号还剩多少、待补货、补货/盘点、批量录入。
+// “库存”标签：当前仓库里每个色号还剩多少、待补货、补货/盘点、批量录入、流水。顶上换仓库、新建仓库、仓库设置（见 warehouse.js）。
 import { h, clear, toast, sheet, chip, fmtNum, fmtTime, confirmDialog, icon, optionSheet } from '../ui.js';
 import { PALETTE, SERIES, BASE_SERIES, hexOf, normalizeCode, seriesLabel } from '../palette.js';
 import { parseLegendText } from '../extract/text.js';
 import * as store from '../store.js';
 import { readOnlyToast } from '../license.js';
+import { warehouseSheet } from './warehouse.js';
 
-const ui = { filter: 'owned', series: 'all', q: '', tab: 'stock', filtersScroll: 0 };
+const ui = { filter: 'owned', series: 'all', q: '', tab: 'stock', filtersScroll: 0, txAll: false };
+
+/** 顶上一行：当前仓库（点开换仓库、新建、设置） */
+function whBar(app, cur, many) {
+  return h('div.wh-bar',
+    h('button.wh-head', { 'aria-label': `仓库：${cur.name}（点开换仓库、新建仓库）`, onclick: () => warehouseSheet(app) },
+      h('span.wh-ico', '🏠'), h('span.wh-name', cur.name), h('span.caret', '▾')),
+    h('span.tiny.muted.wh-card-t', many ? store.cardLabel(cur) : '点它可以新建仓库'));
+}
 
 export async function renderInventory(app) {
   app.setTitle('库存');
   if (app.fresh) ui.tab = 'stock';
+  const whs = await store.listWarehouses();
+  const cur = await store.currentWh();
+  const many = whs.length > 1;
   const segs = h('div.seg', { style: { margin: '6px 0 4px' } },
     h('button' + (ui.tab === 'stock' ? '.on' : ''), { onclick: () => { ui.tab = 'stock'; app.rerender(); } }, '库存'),
     h('button' + (ui.tab === 'tx' ? '.on' : ''), { onclick: () => { ui.tab = 'tx'; app.rerender(); } }, '流水'));
   if (ui.tab === 'tx') {
     const view = clear(app.view);
-    view.append(segs);
-    return transactions(app, view);
+    view.append(whBar(app, cur, many), segs);
+    return transactions(app, view, cur, whs);
   }
   const settings = app.settings;
-  const inv = await store.getInventory();
+  const inv = await store.getInventory(cur.id);
   const lows = store.lowStockList(inv, settings);
   const lowSet = new Set(lows.map(x => x.code));
   const ownedN = [...inv.values()].filter(r => (r.stock ?? 0) > 0).length;
@@ -30,7 +42,10 @@ export async function renderInventory(app) {
   const search = h('input.input', { type: 'search', placeholder: '搜索色号，如 H7', value: ui.q, autocapitalize: 'characters', autocomplete: 'off' });
   const grid = h('div.inv-grid');
   const sortKey = invSortOf(settings);
-  const list = [...PALETTE.values()];
+  // 这个仓库色卡里的颜色，再加上不在色卡里、但有库存（或者设过补货线）的：改过色卡也不会把豆子藏起来
+  const inCard = new Set(store.cardCodes(cur));
+  const list = [...PALETTE.values()].filter(p => inCard.has(p.code) || inv.has(p.code));
+  if (ui.series !== 'all' && !list.some(p => p.series === ui.series)) ui.series = 'all';
   // 按数量排：没录入的（多半没买过这个颜色）总是排最后；数量一样按色号
   const stockOf = p => inv.get(p.code)?.stock;
   if (sortKey === 'asc') list.sort((a, b) => (stockOf(a) == null) - (stockOf(b) == null) || (stockOf(a) ?? 0) - (stockOf(b) ?? 0));
@@ -65,15 +80,15 @@ export async function renderInventory(app) {
   // 点筛选按钮会整页重画：记住这一排按钮滚到哪了，重画后放回原处（不自动滑回最左边）
   const pick = fn => () => { ui.filtersScroll = filters.scrollLeft; fn(); app.rerender(); };
   const filters = h('div.filters',
-    [['owned', `有库存 ${ownedN}`], ['low', `待补货 ${lows.length}`], ['all', `全部 ${PALETTE.size}`]].map(([k, label]) =>
+    [['owned', `有库存 ${ownedN}`], ['low', `待补货 ${lows.length}`], ['all', `全部 ${list.length}`]].map(([k, label]) =>
       h('button' + (ui.filter === k ? '.on' : ''), { onclick: pick(() => { ui.filter = k; }) }, label)),
     h('span', { style: { width: '8px', flexShrink: 0 } }),
-    ['all', ...SERIES].map(sr => h('button' + (ui.series === sr ? '.on' : ''), { onclick: pick(() => { ui.series = sr; }) }, sr === 'all' ? '全系列' : seriesLabel(sr))));
+    ['all', ...SERIES.filter(sr => list.some(p => p.series === sr))].map(sr => h('button' + (ui.series === sr ? '.on' : ''), { onclick: pick(() => { ui.series = sr; }) }, sr === 'all' ? '全系列' : seriesLabel(sr))));
   // 排序：在列表上方右边（像“按色号 ▾”的下拉），点开选排序方式
   const sortBtn = h('button.inv-sort', { 'aria-label': '排序方式', onclick: () => sortSheet(app) },
     icon('sort'), h('span', INV_SORTS.find(o => o.value === sortKey).short), h('span.caret', '▾'));
 
-  view.append(segs, h('div.inv-tools', search, filters, h('div.inv-head', countEl, sortBtn)));
+  view.append(whBar(app, cur, many), segs, h('div.inv-tools', search, filters, h('div.inv-head', countEl, sortBtn)));
   filters.scrollLeft = ui.filtersScroll;
   requestAnimationFrame(() => { filters.scrollLeft = ui.filtersScroll; });
   if (lows.length && ui.filter !== 'low') {
@@ -102,17 +117,18 @@ function sortSheet(app) {
 
 async function editSheet(app, code) {
   if (app.readOnly) { readOnlyToast(app.readOnly); return; }
-  const settings = app.settings;
-  const inv = await store.getInventory();
+  const cur = await store.currentWh();
+  const many = (await store.listWarehouses()).length > 1;
+  const inv = await store.getInventory(cur.id);
   const rec = inv.get(code);
   const stock = rec?.stock ?? 0;
   const th = rec?.threshold;
-  const txs = (await store.listTransactions()).filter(t => t.deltas.some(d => d.code === code)).slice(0, 6);
+  const txs = (await store.listTransactions({ wh: cur.id })).filter(t => t.deltas.some(d => d.code === code)).slice(0, 6);
   const amount = h('input.input.num', { type: 'number', inputmode: 'numeric', pattern: '[0-9]*', placeholder: '数量', min: 0 });
-  const thInput = h('input.input', { type: 'number', inputmode: 'numeric', pattern: '[0-9]*', placeholder: `默认 ${settings.defaultThreshold}`, value: th ?? '' });
+  const thInput = h('input.input', { type: 'number', inputmode: 'numeric', pattern: '[0-9]*', placeholder: `默认 ${cur.threshold}`, value: th ?? '' });
   const apply = async (changes, type, note) => {
     try {
-      await store.applyChanges(changes, { type, note });
+      await store.applyChanges(changes, { wh: cur.id, type, note });
       toast('已更新', 'ok');
       sh.close();
       app.rerender();
@@ -123,7 +139,7 @@ async function editSheet(app, code) {
       h('div', h('div.muted.small', '当前库存'), h('div', { style: { fontSize: '34px', fontWeight: 800 } }, fmtNum(stock)),
         h('div.tiny.muted', `标准色 ${hexOf(code)}`))),
     h('div.section-title', '补货（加上）'),
-    h('div.quick', settings.restockPresets.map(n => h('button.btn.soft', { onclick: () => apply([{ code, delta: n }], 'restock', '') }, `+${n}`))),
+    h('div.quick', (cur.presets || app.settings.restockPresets).map(n => h('button.btn.soft', { onclick: () => apply([{ code, delta: n }], 'restock', '') }, `+${n}`))),
     h('div.section-title', '自定义数量'),
     h('div.inv-amt', amount,
       h('button.btn', { onclick: () => { const n = Math.round(+amount.value); if (n > 0) apply([{ code, delta: n }], 'restock', ''); else toast('请输入数量'); } }, '加上'),
@@ -132,8 +148,8 @@ async function editSheet(app, code) {
     h('div.section-title', '补货线（剩余低于它就提醒）'),
     h('div.row.gap', thInput, h('button.btn', {
       onclick: async () => {
-        await store.setThreshold(code, thInput.value === '' ? null : +thInput.value);
-        toast(thInput.value === '' ? `已恢复为默认 ${settings.defaultThreshold}` : '已保存', 'ok');
+        await store.setThreshold(code, thInput.value === '' ? null : +thInput.value, cur.id);
+        toast(thInput.value === '' ? `已恢复为默认 ${cur.threshold}` : '已保存', 'ok');
         sh.close(); app.rerender();
       },
     }, '保存')),
@@ -142,11 +158,14 @@ async function editSheet(app, code) {
       return h('div.li', h('div.grow', h('div.small', store.TX_TYPES[t.type] || t.type, t.undone ? h('span.tag', { style: { marginLeft: '6px' } }, '已撤销') : null), h('div.tiny.muted', fmtTime(t.time))),
         h('b.mono', { style: { color: d.delta < 0 ? 'var(--bad-text)' : 'var(--ok-text)' } }, (d.delta > 0 ? '+' : '') + d.delta), h('span.tiny.muted', `→ ${d.after}`));
     }))] : null,
-  ], { title: `${code} 库存` });
+  ], { title: many ? `${code} 库存 · ${cur.name}` : `${code} 库存` });
 }
 
-function batchSheet(app) {
+async function batchSheet(app) {
   if (app.readOnly) { readOnlyToast(app.readOnly); return; }
+  const cur = await store.currentWh();
+  const many = (await store.listWarehouses()).length > 1;
+  const wh = cur.id;
   let mode = 'add';
   const picked = new Set();
   let series = SERIES[0];
@@ -192,16 +211,17 @@ function batchSheet(app) {
     if (pickVal.value === '' || v < 0 || (mode === 'add' && v === 0)) return toast('请输入颗数');
     const codes = [...picked];
     if (!(await confirmDialog(`${mode === 'add' ? `给 ${codes.length} 种颜色各加 ${v} 颗` : `把 ${codes.length} 种颜色都设为 ${v} 颗`}？`, { detail: codes.join('、') }))) return;
-    await store.applyChanges(codes.map(code => (mode === 'add' ? { code, delta: v } : { code, set: v })), { type: mode === 'add' ? 'restock' : 'import', note: `点选 ${codes.length} 色` });
+    await store.applyChanges(codes.map(code => (mode === 'add' ? { code, delta: v } : { code, set: v })), { wh, type: mode === 'add' ? 'restock' : 'import', note: `点选 ${codes.length} 色` });
     toast('已录入', 'ok'); sh.close(); app.rerender();
   });
 
-  // ---- 按范围一次设好 ----
-  const baseCodes = [...PALETTE.values()].filter(p => BASE_SERIES.includes(p.series));
+  // ---- 按范围一次设好（按这个仓库的色卡） ----
+  const card = store.cardCodes(cur).map(c => PALETTE.get(c));
+  const baseCodes = card.filter(p => BASE_SERIES.includes(p.series));
   const ranges = [
-    ['all', `全部 ${PALETTE.size} 色`, () => [...PALETTE.values()]],
-    ...(baseCodes.length && baseCodes.length < PALETTE.size ? [['base', `基础 ${baseCodes.length} 色（A–M）`, () => baseCodes]] : []),
-    ...SERIES.map(sr => [sr, `${seriesLabel(sr)} 系列`, () => [...PALETTE.values()].filter(p => p.series === sr)]),
+    ['all', cur.card?.kind && cur.card.kind !== 'all' ? `这个仓库的色卡 ${card.length} 色` : `全部 ${card.length} 色`, () => card],
+    ...(baseCodes.length && baseCodes.length < card.length ? [['base', `基础 ${baseCodes.length} 色（A–M）`, () => baseCodes]] : []),
+    ...SERIES.filter(sr => card.some(p => p.series === sr)).map(sr => [sr, `${seriesLabel(sr)} 系列`, () => card.filter(p => p.series === sr)]),
   ];
   const seriesSel = h('select.input.range-sel', ranges.map(([k, l]) => h('option', { value: k }, l)));
   const seriesVal = h('input.input.num.range-n', { type: 'number', inputmode: 'numeric', placeholder: '颗数', style: { width: '100px' } });
@@ -212,7 +232,7 @@ function batchSheet(app) {
       const [, label, get] = ranges.find(r => r[0] === seriesSel.value);
       const codes = get().map(p => p.code);
       if (!(await confirmDialog(mode === 'add' ? `给${label}每色加 ${v} 颗？` : `把${label}都设为 ${v} 颗？`, { detail: '适合刚买了整套色卡时使用。之后可以单独修改。' }))) return;
-      await store.applyChanges(codes.map(code => (mode === 'add' ? { code, delta: v } : { code, set: v })), { type: mode === 'add' ? 'restock' : 'import', note: `${label}${mode === 'add' ? '各加' : '设为'} ${v}` });
+      await store.applyChanges(codes.map(code => (mode === 'add' ? { code, delta: v } : { code, set: v })), { wh, type: mode === 'add' ? 'restock' : 'import', note: `${label}${mode === 'add' ? '各加' : '设为'} ${v}` });
       toast('已录入', 'ok'); sh.close(); app.rerender();
     },
   }, '录入');
@@ -243,23 +263,31 @@ function batchSheet(app) {
           detail: items.slice(0, 12).map(i => `${i.code} ${mode === 'add' ? '+' : '='}${i.count}`).join('，') + (items.length > 12 ? '…' : '') + (bad.length ? `\n（无法识别：${bad.join('、')}）` : ''),
         });
         if (!ok) return;
-        await store.applyChanges(items.map(i => mode === 'add' ? { code: i.code, delta: i.count } : { code: i.code, set: i.count }), { type: mode === 'add' ? 'restock' : 'import', note: '批量' });
+        await store.applyChanges(items.map(i => mode === 'add' ? { code: i.code, delta: i.count } : { code: i.code, set: i.count }), { wh, type: mode === 'add' ? 'restock' : 'import', note: '批量' });
         toast('已录入', 'ok'); sh.close(); app.rerender();
       },
     }, '录入列表'),
     out,
-  ], { title: '批量录入库存', tall: true });
+  ], { title: many ? `批量录入 · ${cur.name}` : '批量录入库存', tall: true });
   renderSeg(); renderTabs(); renderGrid(); refresh();
 }
 
 // ---------- 库存流水 ----------
 
-async function transactions(app, view) {
-  const list = await store.listTransactions();
+async function transactions(app, view, cur, whs) {
+  // 默认只看当前仓库的流水；有几个仓库时可以看全部（每条写着是哪个仓库的）
+  const all = ui.txAll && whs.length > 1;
+  if (whs.length > 1) {
+    view.append(h('div.seg.tx-scope', { style: { margin: '6px 0 0' } },
+      h('button' + (!all ? '.on' : ''), { onclick: () => { ui.txAll = false; app.rerender(); } }, `只看“${cur.name}”`),
+      h('button' + (all ? '.on' : ''), { onclick: () => { ui.txAll = true; app.rerender(); } }, '全部仓库')));
+  }
+  const list = await store.listTransactions(all ? {} : { wh: cur.id });
   if (!list.length) {
-    view.append(h('div.empty', h('div.big-ico', '📒'), h('p', '还没有库存变动记录。')));
+    view.append(h('div.empty', h('div.big-ico', '📒'), h('p', whs.length > 1 && !all ? `“${cur.name}”还没有库存变动记录。` : '还没有库存变动记录。')));
     return;
   }
+  const names = new Map((await store.listWarehouses({ all: true })).map(w => [w.id, store.whLabel(w)]));
   const patterns = new Map((await store.listPatterns()).map(p => [p.id, p]));
   const box = h('div.list', { style: { marginTop: '10px' } });
   for (const t of list.slice(0, 300)) {
@@ -269,7 +297,7 @@ async function transactions(app, view) {
     box.append(h('div.li.click', { style: { flexWrap: 'wrap' }, onclick: () => { deltas.hidden = !deltas.hidden; } },
       h('div.grow',
         h('div', h('b', store.TX_TYPES[t.type] || t.type), pname ? ` · ${pname}` : '', t.note ? ` · ${t.note}` : '', t.undone ? h('span.tag', { style: { marginLeft: '6px' } }, '已撤销') : null),
-        h('div.tiny.muted', `${fmtTime(t.time)} · ${t.deltas.length} 色`)),
+        h('div.tiny.muted', `${fmtTime(t.time)} · ${t.deltas.length} 色${all ? ` · ${names.get(store.txWh(t)) || '（未知仓库）'}` : ''}${t.undoNote ? ` · ${t.undoNote}` : ''}`)),
       h('b.mono', { style: { color: sum < 0 ? 'var(--bad-text)' : 'var(--ok-text)' } }, (sum > 0 ? '+' : '') + fmtNum(sum)),
       h('div', { style: { flexBasis: '100%' } }, deltas)));
   }

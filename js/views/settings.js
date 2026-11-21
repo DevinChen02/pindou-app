@@ -1,4 +1,4 @@
-// “设置”标签：识别方法开关（开启前必须填好所需参数并通过自检）、库存参数、备份。
+// “设置”标签：识别方法开关（开启前必须填好所需参数并通过自检）、仓库（每个仓库的设置在 warehouse.js）、损耗、备份。
 import { h, clear, toast, confirmDialog, shareFile, copyText, fmtTime, sheet } from '../ui.js';
 import * as store from '../store.js';
 import { testConnection } from '../extract/vlm.js';
@@ -8,6 +8,7 @@ import { PALETTE, SERIES } from '../palette.js';
 import { APP_VERSION } from '../version.js';
 import { updater } from '../app.js';
 import * as license from '../license.js';
+import { editWarehouse } from './warehouse.js';
 
 const PROVIDERS = {
   anthropic: { name: 'Claude', full: 'Anthropic Claude', keyHint: 'sk-ant-…', where: 'platform.claude.com → API Keys' },
@@ -36,7 +37,7 @@ export async function renderSettings(app) {
 
   view.append(h('div.section-title', '识字模型'), modelCard(app));
   view.append(h('div.section-title', '色卡'), paletteCard(app));
-  view.append(h('div.section-title', '库存'), inventoryCard(app));
+  view.append(h('div.section-title', '仓库和库存'), inventoryCard(app, await store.listWarehouses()));
   view.append(h('div.section-title', '数据与备份'), dataCard(app));
   view.append(h('div.section-title', '关于'), aboutCard(app));
   if (license.hasOwnerKey()) view.append(h('div.section-title', '试用激活码（只有你的手机上有）'), ownerCard(app));
@@ -311,28 +312,26 @@ function paletteCard(app) {
     h('div.tiny.muted', { style: { marginTop: '8px' } }, '新增、修改、删除色号和颜色；支持从照片取色、批量导入导出。'));
 }
 
-// ---------- 库存参数 ----------
+// ---------- 仓库和库存 ----------
 
-function inventoryCard(app) {
+function inventoryCard(app, whs) {
   const s = app.settings;
-  const th = h('input.input', { type: 'number', inputmode: 'numeric', value: s.defaultThreshold, min: 0 });
   const loss = h('input.input', { type: 'number', inputmode: 'decimal', value: s.lossPercent, min: 0, max: 50, step: 1 });
-  const presets = h('input.input', { value: s.restockPresets.join(', '), inputmode: 'numeric', style: { width: '150px' } });
-  const save = async () => {
-    const t = Math.round(+th.value), l = +loss.value;
-    const ps = presets.value.split(/[,，\s]+/).map(Number).filter(n => n > 0).slice(0, 6);
-    if (!(t >= 0)) return toast('补货线要是 0 或正数', 'error');
+  loss.addEventListener('change', async () => {
+    const l = +loss.value;
     if (!(l >= 0 && l <= 50)) return toast('损耗在 0–50% 之间', 'error');
-    s.defaultThreshold = t; s.lossPercent = l; s.restockPresets = ps.length ? ps : [100, 500, 1000];
+    s.lossPercent = l;
     await store.saveSettings(s);
     toast('已保存', 'ok');
-    app.updateBadge();
-  };
-  for (const el of [th, loss, presets]) el.addEventListener('change', save);
-  return h('div.card',
-    h('div.kv', h('div', h('div.k', '默认补货线（颗）'), h('div.d', '某色剩余低于它就提醒补货；可在库存里给单色另设')), th),
-    h('div.kv', h('div', h('div.k', '损耗（%）'), h('div.d', '掉豆、拼错的余量。例：5 表示需要量多算 5%')), loss),
-    h('div.kv', h('div', h('div.k', '快捷补货按钮'), h('div.d', '库存页里一键 +N，用逗号分隔')), presets));
+  });
+  // 仓库：每个仓库自己的名字、色卡、默认补货线、快捷补货按钮（以前在这里的“默认补货线”“快捷补货按钮”搬进了仓库设置）
+  return h('div.card.set-wh',
+    whs.map(w => h('div.kv', { 'data-wh': w.id },
+      h('div', h('div.k', '🏠 ' + w.name), h('div.d', `${store.cardLabel(w)} · 补货线 ${w.threshold} 颗 · 快捷 +${(w.presets || []).join(' / +')}`)),
+      h('button.btn.sm.soft', { onclick: () => editWarehouse(app, w) }, '设置'))),
+    h('div.kv', h('div', h('div.k', '新建仓库'), h('div.d', '家里、工作室、某个品牌的一套…各管各的库存和流水')),
+      h('button.btn.sm.soft.set-wh-new', { onclick: () => editWarehouse(app, null) }, '＋ 新建')),
+    h('div.kv', h('div', h('div.k', '损耗（%）'), h('div.d', '掉豆、拼错的余量。例：5 表示需要量多算 5%（所有仓库都一样）')), loss));
 }
 
 // ---------- 数据 ----------
@@ -351,7 +350,9 @@ function dataCard(app) {
     if (!f) return;
     try {
       const data = JSON.parse(await f.text());
-      if (!(await confirmDialog('用这个备份覆盖当前所有数据？', { ok: '覆盖导入', danger: true, detail: `备份时间：${data.exportedAt || '未知'}；${(data.colors || []).length} 个色号，${(data.patterns || []).length} 张图纸${(data.images || []).length ? `，${data.images.length} 张原图` : ''}。当前数据会被替换。` }))) return;
+      const nWh = (data.warehouses || []).filter(w => !w.deleted).length || 1;
+      const nStock = Array.isArray(data.stock) ? data.stock.length : (data.colors || []).length;
+      if (!(await confirmDialog('用这个备份覆盖当前所有数据？', { ok: '覆盖导入', danger: true, detail: `备份时间：${data.exportedAt || '未知'}；${nWh > 1 ? `${nWh} 个仓库、` : ''}${nStock} 条库存，${(data.patterns || []).length} 张图纸${(data.images || []).length ? `，${data.images.length} 张原图` : ''}。当前数据会被替换。` }))) return;
       await store.importData(data);
       toast('已导入', 'ok');
       app.render();
@@ -379,7 +380,7 @@ function dataCard(app) {
     }, '导出')),
     h('div.kv', h('div', h('div.k', '从备份恢复'), h('div.d', '选择之前导出的 JSON 文件')), h('label.btn.sm', fileIn, '导入')),
     h('div.kv', h('div', h('div.k', '本地存储'), persistLine)),
-    h('div.kv', h('div', h('div.k', '清空所有数据'), h('div.d', '库存、图纸、流水、设置全部删除')),
+    h('div.kv', h('div', h('div.k', '清空所有数据'), h('div.d', '仓库和库存、图纸、流水、设置全部删除')),
       h('button.btn.sm.danger', {
         onclick: async () => {
           if (!(await confirmDialog('确定清空所有数据？', { ok: '清空', danger: true, detail: '无法恢复。建议先导出备份。' }))) return;

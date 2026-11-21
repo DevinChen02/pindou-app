@@ -10,7 +10,8 @@ import { ocrOpt } from '../ocrcells.js';
 import { openImageViewer, entriesFromImages } from '../viewer.js';
 import { makeCanvas, contentBounds, guessLegendRect } from '../image.js';
 import { orderItems, orderOf, showOf, spotOf, placeOf, viewSheet as viewOptions, boardStage, colorStrip, keepTrayScroll, selBar, cellCounts, cellWhere } from '../boardview.js';
-import { goPattern, finishAndShow, revertPending } from './patterns.js';
+import { goPattern, finishAndShow, revertPending, settleWhDefault } from './patterns.js';
+import { whChoice, shortNote } from './warehouse.js';
 import { renderSetup, startSetup, setupActive } from './boardsetup.js';
 import { ipadSheet, sentToIpad, scanProgress } from './ipad-send.js';
 import { readOnlyText } from '../license.js';
@@ -563,16 +564,23 @@ export async function reviewFlow(app, p, { board = p.board, onDone = null } = {}
 async function finishAll(app, p) {
   const left = store.remainingNeed(p, app.settings).filter(r => r.left > 0);
   const total = left.reduce((a, r) => a + r.left, 0);
+  const amounts = Object.fromEntries(left.map(r => [r.code, r.left]));
+  // 几个仓库时：从哪个仓库扣（默认这次拼豆结算过的那个，否则当前仓库）
+  const whs = await store.listWarehouses();
+  let wh = await settleWhDefault(p);
+  const extra = whChoice(whs, wh, v => { wh = v; }, { note: await shortNote(amounts, app.settings) });
   if (!(await confirmDialog('确定后将确定减少拼豆库存，是否继续？', {
-    ok: '确定，扣减库存',
+    ok: '确定，扣减库存', extra,
     detail: `全图已拼好：${store.usesBoard(p) ? '按拼豆板上的豆子' : '按清单数量'}扣减 ${left.length} 种颜色，共 ${fmtNum(total)} 颗${Number(app.settings.lossPercent) > 0 ? `（含损耗 ${app.settings.lossPercent}%）` : ''}。库存记录不够的颜色扣到 0 为止。之后可以在图纸里撤销。`,
   }))) return;
   bs.sel = null;
-  await finishAndShow(app, p, Object.fromEntries(left.map(r => [r.code, r.left])), { finish: true });
+  await finishAndShow(app, p, amounts, { finish: true, wh });
 }
 
 /** 先拼到这里：拼好的颜色扣库存（拼上去的豆子挑不下来），没拼好的放回库存；拼了一部分的可以填用掉几颗 */
-function endSheet(app, p) {
+async function endSheet(app, p) {
+  const whs = await store.listWarehouses();
+  let wh = await settleWhDefault(p);
   const rem = store.remainingNeed(p, app.settings);
   const done = new Set(p.build?.done || []);
   const doneRows = rem.filter(r => done.has(r.code) && r.left > 0);
@@ -593,8 +601,10 @@ function endSheet(app, p) {
       s.close();
       if (await scanProgress(app, p, buildItems(p, app.settings))) endSheet(app, await store.getPattern(p.id));
     } }, '📷 扫 iPad 上的进度码')) : null;
+  const whRow = whs.length > 1 ? h('div.end-sec.end-wh', whChoice(whs, wh, v => { wh = v; }, { label: '🏠 从哪个仓库扣' })) : null;
   const s = sheet([
     ipadRow,
+    whRow,
     h('div.end-sec',
       h('div.small', h('b', '✅ 已拼好的颜色：扣减库存'), h('span.muted', '（拼上去的豆子挑不下来）')),
       doneRows.length ? h('div.row.wrap.gap-s', { style: { marginTop: '6px' } }, doneRows.map(r => h('span.end-chip', chip(r.code, { size: 'sm' }), `×${fmtNum(r.left)}`)))
@@ -612,11 +622,12 @@ function endSheet(app, p) {
           const amounts = Object.fromEntries(doneRows.map(r => [r.code, r.left]));
           for (const [c, n] of Object.entries(partial)) if (n > 0) amounts[c] = (amounts[c] || 0) + n;
           const n = Object.values(amounts).reduce((a, b) => a + b, 0);
-          if (n && !(await confirmDialog('确定后将确定减少拼豆库存，是否继续？', { ok: '确定', detail: `扣减 ${Object.keys(amounts).length} 种颜色，共 ${fmtNum(n)} 颗；其余放回库存。` }))) return;
+          const whName = whs.length > 1 ? `从“${(whs.find(w => w.id === wh) || whs[0]).name}”` : '';
+          if (n && !(await confirmDialog('确定后将确定减少拼豆库存，是否继续？', { ok: '确定', detail: `${whName}扣减 ${Object.keys(amounts).length} 种颜色，共 ${fmtNum(n)} 颗；其余放回库存。` }))) return;
           s.close();
           bs.sel = null;
           if (!n && keep) { toast('没有要扣的，进度已保存'); return goPattern(app, p.id); }
-          await finishAndShow(app, p, amounts, keep ? { finish: false } : { abandon: true });
+          await finishAndShow(app, p, amounts, keep ? { finish: false, wh } : { abandon: true, wh });
         },
       }, '确定')),
   ], { title: '先拼到这里', tall: true });
